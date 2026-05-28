@@ -38,6 +38,81 @@ The architecture intentionally uses a **modular monolith** rather than microserv
 | Dashboard and Analytics | Role-aware dashboard exposes cards, chart-ready series and SLA alert lists. | When users log in, they need immediate operational insight without the frontend computing sensitive aggregates. | Role-based data visibility, aggregate SQL/read model, read-only dashboard, compact DTOs. | Dashboard returns summary metrics; charts use stable label/value DTOs; alerts are admin-only; dashboard never mutates insurance workflows; source queries remain tenant-scoped. |
 | SLA Monitoring | Background evaluation creates alerts for overdue claims, appointments and support conversations. | When work exceeds expected handling time, operations leads need active alerts that do not duplicate across repeated evaluations. | Background job isolation, idempotent active alert creation, tenant-scoped alert records, source-resource links. | SLA evaluation can run repeatedly without duplicate active alerts; resolved/closed workflow items stop active alerts; alerts link to authorized claim, queue or conversation contexts. |
 
+## Business Capability Matrix
+
+| Capability | JTBD | Success KPI | Primary Risk | Mitigation | Owner |
+| --- | --- | --- | --- | --- | --- |
+| Claim Processing | Move customer incidents from report to resolution with transparent state and accountability. | Average claim resolution time under 5 working days; 100% transitions auditable; rejected claim dispute rate under 3%. | Invalid transition or missing decision trace. | Claim state machine, transition reason, audit trail, tenant-scoped history. | `insurance` |
+| Customer Self-Service | Let customers view coverage, claims, appointments and support threads without calling staff for basic status. | 60%+ routine status checks resolved through portal; portal read P95 under 300 ms. | Customer sees another tenant/customer record. | Linked customer resolution from trusted actor, no client-supplied customer authorization, portal DTO projection. | `insurance` |
+| Employee Workload Management | Give employees a prioritized work queue for assigned customers and cases. | No overdue work item older than 7 days; workload distribution within +/-20% across active employees. | Work imbalance or missed task. | Assignment model, priority/due fields, bounded queue, SLA alerting. | `insurance` + `dashboard` |
+| Customer Support | Preserve appointment and conversation history across support interactions. | First response under 4 hours; unresolved support conversations older than 1 business day flagged. | Missed conversation or unauthorized thread access. | Conversation visibility rules, message pagination, support SLA alerts. | `insurance` |
+| Knowledge Chatbot | Deflect repetitive support questions using trusted company knowledge. | 80%+ answer usefulness for knowledge-backed questions; 0 unsupported claim/policy decisions by AI. | Hallucination, stale knowledge or prompt injection. | Tenant-scoped RAG, citations, bounded context, deterministic fallback. | `ai` |
+| Operational Dashboard | Surface portfolio health to managers without exposing workflow mutation paths. | Dashboard summary P95 under 300 ms; active SLA alerts visible to admins. | Expensive aggregation or unauthorized metric exposure. | Aggregate queries, role gates, compact chart DTOs, no dashboard commands. | `dashboard` |
+| Governance and Audit | Make critical actions traceable without leaking sensitive content. | 100% critical commands have actor/tenant/resource audit; 0 tokens/raw prompts/full support messages in audit metadata. | Sensitive data leakage through logs/audit. | PII minimization, safe metadata, trace id middleware, RBAC. | `platform` |
+
+## Feature Risk Register
+
+| Area | Risk | Impact | Mitigation | Residual Risk |
+| --- | --- | --- | --- | --- |
+| Claim lifecycle | Invalid state transition or skipped review step. | Wrong claim decision, audit gap, customer dispute. | Explicit transition matrix, role checks, required reason, persisted transition history. | Idempotency key for repeated transition requests remains a production hardening item. |
+| Claim intake | Duplicate incident/claim submission. | Duplicate work and customer confusion. | Tenant-scoped incident records, audit trail, planned idempotency key/natural duplicate detection. | Duplicate detection is documented but not fully implemented for every command. |
+| Customer portal | Cross-customer or cross-tenant data exposure. | Severe privacy and compliance issue. | Customer resolved from linked user; all queries filter `organization_id` and `customer_id`; object authorization tests. | Real production auth integration must replace demo headers. |
+| Employee queue | N+1 queries or unbounded queue reads. | Slow operations dashboard and employee workspace. | Bounded list endpoints, projection DTOs, query/index budget. | Query-plan validation should be repeated with production-scale data. |
+| AI chatbot | Hallucinated answer or unauthorized knowledge leakage. | Wrong policy guidance or data breach. | Tenant-scoped retrieval, bounded chunks, citations, no-source fallback, no claim/policy decisions by AI. | External provider timeout/error policy must be enforced when provider integration is added. |
+| Support conversation | Duplicate messages on retry or unauthorized thread access. | Confusing support history or privacy incident. | Conversation object authorization, bounded message history, idempotency requirement. | Message idempotency key is planned before external production traffic. |
+| Dashboard/SLA | Duplicate active SLA alerts. | Alert fatigue and poor operational trust. | SLA evaluation dedupe by active alert target, idempotent job behavior tests. | Ownership/assignment-specific alert routing can be refined. |
+| Audit/logging | PII, raw prompts or tokens stored in logs. | Compliance breach. | Safe metadata rules, audit redaction policy, no raw prompt/full message/full claim narrative in audit. | Retention enforcement is a policy target, not fully automated in current code. |
+
+## Domain Events
+
+The current implementation uses service calls and audit records inside a modular monolith. The following domain events define the target event vocabulary for future internal event dispatch or background processing. Kafka is not required; these events can be in-process, outbox-backed or job-backed.
+
+| Event | Producer | Consumers | Purpose |
+| --- | --- | --- | --- |
+| `PolicyActivated` | `insurance` policy workflow | Dashboard, audit, notification adapter | Update active coverage metrics and create traceability for policy activation. |
+| `CustomerAssigned` | `insurance` assignment workflow | Queue, dashboard, audit | Refresh employee workload and support ownership. |
+| `IncidentReported` | `insurance` incident workflow | Queue, claim lifecycle, dashboard, SLA, audit | Create actionable claim work and customer-visible status. |
+| `ClaimTransitioned` | `insurance` claim lifecycle | Dashboard, SLA, audit, support conversation context | Update claim timeline, metrics and overdue evaluation. |
+| `AppointmentRequested` | `insurance` portal/support workflow | Queue, SLA, audit, notification adapter | Create employee follow-up work and appointment SLA tracking. |
+| `SupportConversationStarted` | `insurance` support workflow | Queue, SLA, audit, AI assistance orchestration | Track open support demand and conversation ownership. |
+| `SupportMessageSent` | `insurance` support workflow | SLA, AI orchestration, audit-safe telemetry | Update last activity and optionally trigger AI assistance. |
+| `KnowledgeDocumentIngested` | `ai` knowledge workflow | Retrieval index, audit, admin dashboard | Make uploaded knowledge searchable for tenant-scoped RAG. |
+| `SlaAlertRaised` | `dashboard` SLA evaluator | Dashboard, notification adapter, audit | Surface overdue claim/appointment/conversation work. |
+| `SlaAlertResolved` | `dashboard` SLA evaluator | Dashboard, audit | Remove noise when work is completed or no longer breached. |
+
+## Regulatory and Insurance Compliance
+
+This project is not a certified compliance product. The architecture is designed to be ready for common insurance and privacy controls.
+
+### Data Protection
+
+- GDPR/PDPA-ready principle: collect and expose the minimum customer data needed for the workflow.
+- Tenant-owned data must be scoped by `organization_id`.
+- Customer authorization must be derived from trusted actor context, not client-provided identifiers.
+- PII should be represented by ids/references in audit metadata wherever possible.
+
+### Auditability
+
+- Claim transitions must be auditable with actor, tenant, previous state, new state and reason metadata.
+- Admin actions such as user creation and password reset request must be auditable.
+- AI-assisted support responses should store safe citation ids, not raw retrieved documents or raw prompts.
+
+### Retention Targets
+
+- Claim records and transition history: retain for 7 years unless local regulation requires longer.
+- Audit logs: retain for at least 3 years.
+- Support conversations: retain according to customer support and insurance dispute policy.
+- Uploaded knowledge documents: retain while active, with admin-controlled archival/removal policy.
+
+Retention automation is a future operational control; the current code models the records and safe metadata required for retention policies.
+
+### Security Standards
+
+- OWASP Top 10: authorization, injection, sensitive data exposure and logging risks are explicitly addressed.
+- OWASP ASVS-aligned controls: centralized auth context, RBAC, object authorization and safe error behavior.
+- JWT security best practices: production tenant/user/role claims must come from signed bearer tokens.
+- AI safety controls: tenant-scoped retrieval, context budget, citation requirement and deterministic fallback.
+
 ## Non-Functional Requirements
 
 | Concern | Target | Architecture support |
