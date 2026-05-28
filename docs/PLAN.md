@@ -2058,6 +2058,142 @@ Turn the documented idempotency matrix into implementation for high-risk mutatio
 - Idempotency records are tenant-scoped and cannot be used across organizations.
 - Audit metadata remains PII-safe and includes enough trace context to investigate duplicate submissions.
 
+### T08.4 - Move Dashboard to Event-Fed Read Models
+
+**Status**
+
+- Pending.
+
+**Depends On**
+
+- T08.3.
+
+**JTBD**
+
+As a dashboard maintainer, I need operational metrics to be isolated from private insurance schema changes so reporting can evolve without breaking claim, policy or support workflows.
+
+**Description**
+
+Refactor dashboard reads toward dashboard-owned read models populated from domain events. This removes long-term shared-database coupling while keeping the modular monolith deployment model.
+
+**Implementation**
+
+- Define dashboard read model tables for claim status counts, policy activation metrics, support activity and SLA targets.
+- Populate read models from outbox events such as `ClaimTransitioned`, `PolicyActivated`, `AppointmentRequested`, `SupportConversationStarted` and `SupportMessageSent`.
+- Replace dashboard queries that depend on private insurance table layout with dashboard projections or stable query-service DTO contracts.
+- Add reconciliation job support so read models can be rebuilt from source data during migration or repair.
+- Add indexes for tenant, metric dimension, time bucket and target resource lookups.
+
+**Acceptance Criteria**
+
+- Dashboard summary/chart endpoints can read from dashboard-owned projections for the selected metrics.
+- A change to private insurance table layout does not require dashboard route/controller changes when the event contract is stable.
+- Replaying the same event does not double-count metrics or duplicate active SLA alerts.
+- Projection queries are tenant-scoped, bounded and index-backed.
+- Tests cover event projection, replay idempotency, empty projection state and reconciliation behavior.
+
+### T08.5 - Unify AI and Human Support Conversation Handoff
+
+**Status**
+
+- Pending.
+
+**Depends On**
+
+- T08.4.
+
+**JTBD**
+
+As a customer, I need one continuous support conversation where AI can help first and an employee can take over without forcing me to start a separate chat.
+
+**Description**
+
+Make `Conversation` the single product-facing support surface. AI responses become assistant messages in the same thread, and low-confidence/no-source/customer-requested human escalation assigns or queues an employee follow-up.
+
+**Implementation**
+
+- Extend conversation/message DTOs to distinguish user, assistant and employee messages without exposing internal orchestration details.
+- Add handoff state or tags such as `needs_human`, `ai_no_source`, `low_confidence` and `assigned_employee_id`.
+- Route AI-assisted messages through the existing conversation authorization and idempotency flow.
+- Add service behavior that creates/updates queue work when AI cannot answer safely or the customer requests a human.
+- Update frontend chat UI to show one conversation timeline and employee takeover state.
+
+**Acceptance Criteria**
+
+- Customer uses one conversation route for AI and human support.
+- AI no-source or low-confidence result creates a visible handoff/queue signal.
+- Employee replies appear in the same authorized thread.
+- AI cannot mutate claims, policies or payments during handoff.
+- Tests cover customer handoff, employee takeover, duplicate AI retry and cross-tenant conversation access denial.
+
+### T08.6 - Isolate AI Resource Consumption
+
+**Status**
+
+- Pending.
+
+**Depends On**
+
+- T08.5.
+
+**JTBD**
+
+As an operator, I need heavy AI ingestion, retrieval and provider calls isolated so they cannot exhaust resources required by core claim transactions.
+
+**Description**
+
+Separate AI workload resource budgets from core insurance commands through connection-pool configuration, worker concurrency limits and operational telemetry.
+
+**Implementation**
+
+- Add configuration for AI-specific database/session pool limits or a future storage adapter boundary where supported by the current infrastructure.
+- Limit concurrent PDF ingestion, embedding, retrieval and provider-call jobs independently from normal background jobs.
+- Add timeout and cancellation behavior for AI provider calls and long retrieval operations.
+- Add telemetry for AI queue depth, provider latency, timeout count and pool saturation.
+- Document fallback behavior when AI resources are exhausted: safe no-source/try-again response while core insurance workflows continue.
+
+**Acceptance Criteria**
+
+- AI worker concurrency is independently configurable from normal shared jobs.
+- AI timeout or pool saturation does not block claim transition, queue or dashboard non-AI tests.
+- Provider/retrieval timeout paths return safe fallback responses.
+- Telemetry exposes AI saturation without logging raw prompts or document contents.
+- Tests cover exhausted AI budget and continued non-AI workflow availability.
+
+### T08.7 - Add AI Evaluation Harness and Semantic Guardrails
+
+**Status**
+
+- Pending.
+
+**Depends On**
+
+- T08.6.
+
+**JTBD**
+
+As a product and risk owner, I need objective evidence that AI answers stay grounded, cited and safe against prompt injection before customers rely on them.
+
+**Description**
+
+Add an AI quality and safety evaluation workflow. Prompt rules remain useful, but they must be backed by input/output checks and repeatable evaluation cases.
+
+**Implementation**
+
+- Add an evaluation dataset for insurance knowledge questions, no-source questions, prompt-injection attempts, stale-knowledge cases and forbidden claim-decision prompts.
+- Add pre-generation semantic checks for injection, cross-tenant requests and attempts to force claim/policy/payment decisions.
+- Add post-generation checks for unsupported commitments, missing citations, citation mismatch and unsafe financial/coverage language.
+- Record evaluation metrics such as no-source precision, citation accuracy, hallucination rate and forbidden-decision block rate.
+- Add a release checklist step requiring AI prompt/provider changes to run the evaluation harness.
+
+**Acceptance Criteria**
+
+- Evaluation harness can run locally without external production data.
+- Guardrails block or safely fallback on prompt-injection and forbidden-decision cases.
+- AI answer tests assert citations are present and mapped to allowed tenant knowledge chunks.
+- Metrics are documented in test output or a generated report artifact.
+- New AI provider/prompt changes have a clear pass/fail quality gate.
+
 ## Verification Checklist
 
 Use this checklist after feature work that touches auth, tenant data, insurance workflows, AI chat or dashboards.

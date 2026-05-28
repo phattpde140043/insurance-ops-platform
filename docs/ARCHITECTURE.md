@@ -153,6 +153,27 @@ Retention automation is a future operational control; the current code models th
 | Audit safety | No tokens, raw prompts, full support messages or full claim descriptions in audit/log metadata | PII logging rules, audit DTO discipline |
 | Operational reliability | Background jobs carry tenant/resource context and are idempotent where required | Shared job infrastructure, SLA evaluation dedupe |
 
+## Council Critique Response
+
+The 2026-05-29 architecture re-evaluation accepts the main red-team findings as an evolutionary hardening roadmap. The current modular monolith remains the right base, but long-term scale requires stricter internal boundaries, safer AI controls and clearer product-level conversation design.
+
+| Critique | Architecture response | Decision |
+| --- | --- | --- |
+| Shared PostgreSQL can become a bottleneck when AI ingestion/vector workloads grow. | Keep one database for MVP simplicity, but isolate heavy AI workloads with separate connection pools, worker concurrency limits and a future extractable AI storage boundary. | Accept as hardening path. |
+| Dashboard read queries can become shared-database coupling to `insurance` schema. | Move dashboard toward event-fed read models populated from outbox/domain events. Dashboard may consume query DTO contracts, not private insurance table shape. | Accept. |
+| Customers should not experience internal claim workflow complexity. | Keep the internal state machine for audit and staff control, but expose customer-facing status groups such as received, reviewing, decision made and closed. | Accept. |
+| AI chat and support chat should feel like one conversation. | `Conversation` is the product surface. AI is an assistant participant and can hand off to an employee in the same thread when confidence is low or the customer asks for a person. | Accept. |
+| Startup velocity might improve by delaying auth/security prerequisites. | Reject for this portfolio: the project is positioned as production architecture, so tenant isolation, auth and bounded APIs stay baseline requirements. | Reject. |
+| External LLM dependence weakens durability and economics. | Bound provider usage, record safe provider telemetry, support provider adapters and preserve deterministic fallback. SLM/on-prem experimentation is a future optimization, not required for core correctness. | Partially accept. |
+| Prompt-only guardrails are not scientifically sufficient. | Add input/output semantic guardrails and an evaluation harness for hallucination, citation accuracy, no-source behavior and prompt-injection resistance. | Accept. |
+
+Strategic evolution principles:
+
+- Scale inside the modular monolith first: projection DTOs, read models, bounded workers, separate pools and strict indexes before microservice extraction.
+- Do not let dashboard, AI or reporting workloads consume resources needed by claim transaction paths.
+- Treat AI as advisory only; policy, claim and payment decisions remain deterministic business workflows.
+- Make customer experience simpler than internal operations: hide internal states behind role-specific status language.
+
 ## Senior Architecture Decisions
 
 ### 1. Modular Monolith Over Microservices
@@ -194,6 +215,7 @@ The platform is a modular monolith:
 - One NextJS frontend consumes the backend API.
 - Background workers run separately but use the same backend modules and database.
 - Modules are bounded by domain ownership, not by deployment unit.
+- Long-running AI ingestion/vector work must use isolated worker concurrency and, when provider or vector load grows, a dedicated connection pool or storage adapter so core claim commands keep priority.
 
 Do not split modules into microservices unless a future ADR documents the reason, trade-offs, migration plan and operational cost.
 
@@ -237,7 +259,7 @@ flowchart TB
         Shared["shared\nfile assets, background job infrastructure"]
         Insurance["insurance\nplans, customers, policies, assignments, incidents, claims, appointments, support"]
         AI["ai\nknowledge docs, PDF extraction, chunks, retrieval, guarded chat"]
-        Dashboard["dashboard\nmetrics, charts, SLA alerts"]
+        Dashboard["dashboard\nmetrics, charts, SLA alerts, read models"]
     end
 
     Next --> Core
@@ -251,7 +273,7 @@ flowchart TB
     Dashboard --> Platform
 ```
 
-The diagram shows logical dependency flow, not direct import permission for every arrow. Direct imports must follow the module dependency contract below.
+The diagram shows logical dependency flow, not direct import permission for every arrow. Direct imports must follow the module dependency contract below. Dashboard-to-insurance reads should evolve toward query-service DTO contracts or event-populated read models; dashboard must not depend on private insurance table layout for long-term reporting.
 
 ## SOLID Boundaries
 
@@ -475,6 +497,8 @@ Invalid transitions must be rejected before persistence. Customer role may read 
 2. A documented orchestration service requests guarded AI assistance through an `ai` contract.
 3. `ai` retrieval is tenant-scoped and returns bounded citations.
 4. Assistant responses are stored in the relevant conversation without logging raw prompts or sensitive message bodies.
+5. The product-facing conversation is unified: AI and employees participate in the same authorized `Conversation` thread.
+6. Low-confidence AI answers, no-source fallbacks or explicit customer requests for a human should create/assign employee follow-up without starting a separate chat surface.
 
 AI guardrails:
 
@@ -496,12 +520,20 @@ AI rate-limit and cost budget:
 - Return `429` with a safe retry hint when budget is exceeded; do not degrade by widening retrieval scope or bypassing citations.
 - Use worker concurrency limits for ingestion and long-running AI tasks so provider saturation cannot starve normal insurance operations.
 
+AI evaluation and semantic guardrails:
+
+- Add pre-generation checks for prompt injection, cross-tenant data requests and attempts to force policy/claim decisions.
+- Add post-generation checks that block unsupported financial commitments, claim approvals/rejections and answers without valid citations.
+- Maintain an evaluation set covering hallucination, citation accuracy, no-source fallback, stale knowledge and prompt-injection cases.
+- Track evaluation results as release gates for AI changes; a new provider or prompt revision must not reduce safety metrics without an explicit accepted risk.
+
 ### Dashboard and SLA
 
-1. `dashboard` queries source data through read-only repositories/projections.
+1. `dashboard` reads through stable projection DTOs or dashboard-owned read models, not private insurance table shape.
 2. SLA evaluation runs in a background job and writes `sla_alerts` owned by dashboard/SLA architecture.
-3. Alert links point back to authorized source resources.
-4. Dashboard never mutates claim, queue, conversation or policy state.
+3. Event-fed dashboard read models should be populated from outbox events such as `ClaimTransitioned`, `PolicyActivated`, `AppointmentRequested` and `SupportMessageSent`.
+4. Alert links point back to authorized source resources.
+5. Dashboard never mutates claim, queue, conversation or policy state.
 
 ## API Contract Rules
 
