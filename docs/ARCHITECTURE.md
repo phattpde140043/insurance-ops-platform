@@ -2,6 +2,96 @@
 
 This document is the architecture source of truth for the Insurance Operations Platform. `docs/PLAN.md` remains the execution backlog; this file defines the boundaries, dependencies and design rules agents must preserve while implementing that backlog.
 
+## Current Source Code State
+
+Snapshot date: 2026-05-29.
+
+The source currently contains a working modular monolith implementation with:
+
+- FastAPI backend under `backend/app`.
+- Next.js frontend under `frontend/app`.
+- SQLAlchemy models and Alembic migrations under `backend/alembic/versions`.
+- Architecture ADRs under `docs/adr`.
+- Backend unit/integration tests under `backend/app/tests`.
+
+### Implemented Backend Surface
+
+The backend exposes REST APIs through `backend/app/api/v1/router.py` and domain routers.
+
+| Domain | Implemented routes | Primary services |
+| --- | --- | --- |
+| Platform | `GET /me`, organizations, admin users, password reset, audit events, Google login metadata and Google callback | `AuthMembershipService`, `AdminUserService`, `AuditLogService` |
+| AI | `GET /ai/knowledge-documents`, document create/upload/ingest, `POST /ai/chat`, `POST /ai/retrieval/search` | `KnowledgeDocumentService`, `KnowledgeRetrievalService`, `GuardedChatbotService` |
+| Insurance portal | `GET /insurance/portal/summary`, portal policies/incidents/appointments/conversations, portal appointment and conversation commands | `CustomerPortalService` |
+| Workload queues | `GET /insurance/queues/my`, `GET /insurance/queues`, `GET /insurance/queues/{item_id}`, `POST /insurance/queues/{item_id}/actions` | `WorkloadQueueService` |
+| Claims | `GET /insurance/claims/{claim_id}`, history, transition command and claim-linked conversation command | `ClaimLifecycleService`, `InsuranceSupportService` |
+| Insurance core | Plans, customers, policies, assignments, incidents, appointments, conversations and messages | `InsurancePlanService`, `InsuranceCustomerPolicyService`, `InsuranceAssignmentService`, `InsuranceIncidentService`, `InsuranceSupportService` |
+| Dashboard | `GET /dashboard/summary`, charts, alerts and role dashboards | `DashboardAggregationService`, `SlaEvaluationService` |
+
+All list routes that were reviewed in the final regression gate expose bounded `limit` parameters where they return potentially growing collections. Existing list envelopes still use the compatibility `{"items": [...]}` response from `ListResponse`; the richer `meta` envelope remains an architectural target.
+
+### Implemented Persistence
+
+Alembic revisions currently present:
+
+| Revision | Purpose |
+| --- | --- |
+| `0001_schema_backbone` | Creates the initial SQLAlchemy metadata schema. |
+| `0002_queue_fields` | Adds queue `priority` and `due_at` fields to workflow tables. |
+| `0003_claim_lifecycle` | Adds `claim_state` and claim transition history. |
+| `0004_insurance_message_ai_fields` | Adds insurance message `role` and `citations_json` for AI-assisted support replies. |
+| `0005_conversation_claim_link` | Adds optional `claim_id` links to insurance conversations. |
+| `0006_sla_persistence` | Adds SLA rules and SLA alerts. |
+
+Current insurance persistence includes plans, workflows, customers, policies, employee assignments, incident reports, claim transitions, appointments, conversations and messages.
+
+Current dashboard persistence includes `sla_rules` and `sla_alerts`.
+
+Current shared persistence includes file assets and background jobs. The worker supports `knowledge_ingest` as an accepted no-op placeholder and `sla_evaluate` as an implemented SLA evaluation job dispatch.
+
+### Implemented Frontend Surface
+
+Frontend routes currently implemented:
+
+| Route | Current behavior |
+| --- | --- |
+| `/` | Landing/admin task overview using demo data. |
+| `/admin` | Admin placeholder/dashboard surface using demo data. |
+| `/portal` | Customer portal backed by portal APIs, with appointment request and support conversation entry point. |
+| `/insurance` | Employee insurance operations queue backed by queue APIs, with incident reporting form. |
+| `/insurance/claims/[id]` | Claim detail page with state, timeline, transitions and support-thread entry point. |
+| `/ai` | Persisted support conversation list/thread UI with message composer and AI-assisted sends. |
+| `/dashboard` | API-driven metrics, chart rows and SLA alert table. |
+
+The frontend centralizes API access in `frontend/app/lib/api-client.ts`. Demo header context is still used for local development and should be replaced by real bearer-token auth before production deployment.
+
+### Implemented Test Coverage
+
+The current tests cover:
+
+- Production-like auth and local demo header behavior.
+- Tenant isolation and object authorization helpers.
+- Customer portal summary/history/commands.
+- Workload queue list/detail/actions.
+- Claim lifecycle contract and service transitions.
+- Support conversation visibility, AI-assisted persistence and claim-linked thread creation.
+- Dashboard metrics, chart DTOs, SLA status classification and SLA evaluation idempotency.
+- Database metadata contract for queue fields, claim lifecycle, message AI fields, conversation claim links and SLA persistence.
+- Retrieval tenant scoping contract.
+- Trace id middleware and permissions.
+
+Verification checklist lives in `docs/PLAN.md`.
+
+### Known Implementation Gaps And Accepted Risks
+
+- GitHub Actions workflow was not pushed because the available GitHub token did not have `workflow` scope.
+- `ListResponse` still lacks the planned `meta` object; list endpoints currently rely on bounded `limit` values and compatibility envelopes.
+- Mutation idempotency is documented but not fully implemented for every command class.
+- Demo header auth and hardcoded frontend demo contexts are local-development mechanisms only.
+- AI chat uses a local guarded retrieval implementation and deterministic knowledge-base answer composition; external provider integration is not implemented.
+- Some dashboard routes are role-gated but still broad tenant-level summaries; deeper role-specific redaction can be expanded before production use.
+- `knowledge_ingest` worker handling is currently a placeholder in the background worker; ingestion is orchestrated by existing services/jobs but the worker path is not a full ingestion executor yet.
+
 ## Architecture Style
 
 The platform is a modular monolith:
@@ -182,6 +272,7 @@ Owns:
 
 - Read-only aggregation services.
 - Chart DTOs and SLA alert read surfaces.
+- SLA rule/alert persistence and SLA evaluation logic.
 - Dashboard-specific projections/read models when direct aggregates are no longer sufficient.
 
 Must not own:
@@ -231,7 +322,7 @@ Cross-domain orchestration must use one of these patterns:
 | AI chat sessions/messages | `ai` | AI-native chat state; support conversation state remains in `insurance`. |
 | File assets | `shared` | Metadata and storage references only. |
 | Background jobs | `shared` infrastructure, owning domain handler | Payloads must include tenant and trace context. |
-| Dashboard metrics and SLA reads | `dashboard` read models/projections | Must not mutate workflow state. |
+| Dashboard metrics, SLA rules and SLA alerts | `dashboard` | Dashboard may persist SLA alert state but must not mutate insurance workflow source state. |
 
 ## Key Data Flows
 
@@ -306,7 +397,7 @@ AI guardrails:
 ### Dashboard and SLA
 
 1. `dashboard` queries source data through read-only repositories/projections.
-2. SLA evaluation runs in a background job and writes alert records or read-model state owned by dashboard/SLA architecture.
+2. SLA evaluation runs in a background job and writes `sla_alerts` owned by dashboard/SLA architecture.
 3. Alert links point back to authorized source resources.
 4. Dashboard never mutates claim, queue, conversation or policy state.
 
