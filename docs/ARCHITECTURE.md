@@ -1,96 +1,73 @@
-# Insurance Operations Platform Architecture
+# Insurance Operations Platform - Production Architecture Portfolio
 
-This document is the architecture source of truth for the Insurance Operations Platform. `docs/PLAN.md` remains the execution backlog; this file defines the boundaries, dependencies and design rules agents must preserve while implementing that backlog.
+This document presents the production architecture for an insurance operations platform. It is written as a portfolio-grade architecture record: first mapping business requirements to the solution, then documenting non-functional targets, key architecture decisions, module boundaries and implementation status.
 
-## Current Source Code State
+`docs/PLAN.md` remains the execution backlog. This file defines the target architecture, implemented boundaries and design rules future agents must preserve.
 
-Snapshot date: 2026-05-29.
+## Executive Summary
 
-The source currently contains a working modular monolith implementation with:
+The platform supports an insurance company with admins, employees and customers. It covers policy/customer operations, incident reporting, claim lifecycle management, employee workload queues, customer self-service, AI-assisted support and operational dashboards.
 
-- FastAPI backend under `backend/app`.
-- Next.js frontend under `frontend/app`.
-- SQLAlchemy models and Alembic migrations under `backend/alembic/versions`.
-- Architecture ADRs under `docs/adr`.
-- Backend unit/integration tests under `backend/app/tests`.
+The architecture intentionally uses a **modular monolith** rather than microservices. This keeps local development, transactional consistency and deployment simple while still demonstrating enterprise boundaries through modules: `platform`, `insurance`, `ai`, `dashboard`, `shared` and `core`.
 
-### Implemented Backend Surface
+## Requirement Mapping
 
-The backend exposes REST APIs through `backend/app/api/v1/router.py` and domain routers.
+| Business requirement | Architecture module | API/UI surface | Security and performance concern |
+| --- | --- | --- | --- |
+| Admin manages users, roles and audit history | `platform` | `/me`, `/admin/users`, `/admin/audit-events`, Google SSO adapter | JWT/RBAC, audit metadata redaction, admin-only routes |
+| Employee manages assigned customers and work | `insurance` | `/insurance`, `/insurance/queues/my`, queue detail/action APIs | Object-level authorization, bounded queue lists, priority/due indexes |
+| Customer views policies and support context | `insurance` | `/portal`, portal summary/history APIs | Customer resolved from trusted actor, no client-supplied `customer_id` |
+| Customer reports incident/claim | `insurance` | incident APIs, claim detail UI | Tenant-scoped create/read, claim state machine, PII-safe audit |
+| Claim progresses through governed lifecycle | `insurance` | claim detail/history/transition APIs | Explicit valid transitions, role checks, transition history |
+| Support conversation persists across sessions | `insurance` | `/ai`, conversation/message APIs | Customer/employee visibility rules, bounded message history |
+| Chatbot answers only from company knowledge base | `ai` + `insurance` orchestration | `/ai/chat`, retrieval search, AI-assisted support message send | Tenant-scoped retrieval, bounded context/citations, safe no-source fallback |
+| Dashboard shows operational health | `dashboard` | `/dashboard/summary`, `/dashboard/charts`, `/dashboard/alerts` | Aggregate queries, compact DTOs, admin-only alert list |
+| SLA highlights overdue insurance work | `dashboard` + background job | Claim overdue, appointment overdue and unanswered support conversation alerts | Idempotent alert creation, no duplicate active alerts |
 
-| Domain | Implemented routes | Primary services |
+## Non-Functional Requirements
+
+| Concern | Target | Architecture support |
 | --- | --- | --- |
-| Platform | `GET /me`, organizations, admin users, password reset, audit events, Google login metadata and Google callback | `AuthMembershipService`, `AdminUserService`, `AuditLogService` |
-| AI | `GET /ai/knowledge-documents`, document create/upload/ingest, `POST /ai/chat`, `POST /ai/retrieval/search` | `KnowledgeDocumentService`, `KnowledgeRetrievalService`, `GuardedChatbotService` |
-| Insurance portal | `GET /insurance/portal/summary`, portal policies/incidents/appointments/conversations, portal appointment and conversation commands | `CustomerPortalService` |
-| Workload queues | `GET /insurance/queues/my`, `GET /insurance/queues`, `GET /insurance/queues/{item_id}`, `POST /insurance/queues/{item_id}/actions` | `WorkloadQueueService` |
-| Claims | `GET /insurance/claims/{claim_id}`, history, transition command and claim-linked conversation command | `ClaimLifecycleService`, `InsuranceSupportService` |
-| Insurance core | Plans, customers, policies, assignments, incidents, appointments, conversations and messages | `InsurancePlanService`, `InsuranceCustomerPolicyService`, `InsuranceAssignmentService`, `InsuranceIncidentService`, `InsuranceSupportService` |
-| Dashboard | `GET /dashboard/summary`, charts, alerts and role dashboards | `DashboardAggregationService`, `SlaEvaluationService` |
+| Tenant isolation | 100% tenant-owned queries include `organization_id` | Request context, repository filters, tenant isolation tests |
+| Read latency | P95 standard read APIs under 300 ms for normal tenant data volumes | Bounded lists, projection DTOs, index budget |
+| Write latency | P95 write commands under 700 ms excluding AI/provider calls | Focused service workflows, no unbounded synchronous fan-out |
+| AI answer latency | 10-15 second timeout budget with safe fallback | Bounded retrieval context, deterministic no-source response |
+| List safety | No unbounded list endpoint | `limit` query params with max 100 on reviewed collection APIs |
+| Authorization | Route role check plus service-level object authorization | `require_roles`, service access checks for queues/claims/conversations |
+| Audit safety | No tokens, raw prompts, full support messages or full claim descriptions in audit/log metadata | PII logging rules, audit DTO discipline |
+| Operational reliability | Background jobs carry tenant/resource context and are idempotent where required | Shared job infrastructure, SLA evaluation dedupe |
 
-All list routes that were reviewed in the final regression gate expose bounded `limit` parameters where they return potentially growing collections. Existing list envelopes still use the compatibility `{"items": [...]}` response from `ListResponse`; the richer `meta` envelope remains an architectural target.
+## Senior Architecture Decisions
 
-### Implemented Persistence
+### 1. Modular Monolith Over Microservices
 
-Alembic revisions currently present:
+The system uses one backend deployment and one database, but it enforces domain ownership through module boundaries. This is the right trade-off for the assignment scope: it avoids premature distributed-system complexity while still making future service extraction possible.
 
-| Revision | Purpose |
-| --- | --- |
-| `0001_schema_backbone` | Creates the initial SQLAlchemy metadata schema. |
-| `0002_queue_fields` | Adds queue `priority` and `due_at` fields to workflow tables. |
-| `0003_claim_lifecycle` | Adds `claim_state` and claim transition history. |
-| `0004_insurance_message_ai_fields` | Adds insurance message `role` and `citations_json` for AI-assisted support replies. |
-| `0005_conversation_claim_link` | Adds optional `claim_id` links to insurance conversations. |
-| `0006_sla_persistence` | Adds SLA rules and SLA alerts. |
+Decision record: [ADR 0001](adr/0001-modular-monolith-boundaries.md).
 
-Current insurance persistence includes plans, workflows, customers, policies, employee assignments, incident reports, claim transitions, appointments, conversations and messages.
+### 2. Claim Lifecycle State Machine
 
-Current dashboard persistence includes `sla_rules` and `sla_alerts`.
+Incident reports become governed claim records with explicit lifecycle states and transition history. This prevents arbitrary status strings from creating invalid operational states and gives employees, customers and auditors a shared claim timeline.
 
-Current shared persistence includes file assets and background jobs. The worker supports `knowledge_ingest` as an accepted no-op placeholder and `sla_evaluate` as an implemented SLA evaluation job dispatch.
+Decision record: [ADR 0004](adr/0004-claim-lifecycle-ownership.md).
 
-### Implemented Frontend Surface
+### 3. Guarded RAG Chatbot
 
-Frontend routes currently implemented:
+The chatbot is designed to answer only from tenant-scoped company knowledge chunks. It returns bounded citations and uses a deterministic no-source fallback instead of inventing policy or claim decisions.
 
-| Route | Current behavior |
-| --- | --- |
-| `/` | Landing/admin task overview using demo data. |
-| `/admin` | Admin placeholder/dashboard surface using demo data. |
-| `/portal` | Customer portal backed by portal APIs, with appointment request and support conversation entry point. |
-| `/insurance` | Employee insurance operations queue backed by queue APIs, with incident reporting form. |
-| `/insurance/claims/[id]` | Claim detail page with state, timeline, transitions and support-thread entry point. |
-| `/ai` | Persisted support conversation list/thread UI with message composer and AI-assisted sends. |
-| `/dashboard` | API-driven metrics, chart rows and SLA alert table. |
+Decision record: [ADR 0005](adr/0005-support-chat-ai-orchestration.md).
 
-The frontend centralizes API access in `frontend/app/lib/api-client.ts`. Demo header context is still used for local development and should be replaced by real bearer-token auth before production deployment.
+### 4. SLA as Operational Read Model, Not Workflow Owner
 
-### Implemented Test Coverage
+Dashboard/SLA code may persist alert state, but it must not own insurance workflow mutations. SLA alerts point back to authorized source resources such as claims, appointments or support conversations.
 
-The current tests cover:
+Decision record: [ADR 0006](adr/0006-dashboard-read-model-and-sla-ownership.md).
 
-- Production-like auth and local demo header behavior.
-- Tenant isolation and object authorization helpers.
-- Customer portal summary/history/commands.
-- Workload queue list/detail/actions.
-- Claim lifecycle contract and service transitions.
-- Support conversation visibility, AI-assisted persistence and claim-linked thread creation.
-- Dashboard metrics, chart DTOs, SLA status classification and SLA evaluation idempotency.
-- Database metadata contract for queue fields, claim lifecycle, message AI fields, conversation claim links and SLA persistence.
-- Retrieval tenant scoping contract.
-- Trace id middleware and permissions.
+### 5. Enterprise Auth Adapter Without Locking Core Domain Logic
 
-Verification checklist lives in `docs/PLAN.md`.
+Google SSO is modeled as an optional enterprise auth adapter. The core authorization model remains JWT + RBAC + tenant claims, so the insurance workflow modules do not depend on Google-specific behavior.
 
-### Known Implementation Gaps And Accepted Risks
-
-- GitHub Actions workflow was not pushed because the available GitHub token did not have `workflow` scope.
-- `ListResponse` still lacks the planned `meta` object; list endpoints currently rely on bounded `limit` values and compatibility envelopes.
-- Mutation idempotency is documented but not fully implemented for every command class.
-- Demo header auth and hardcoded frontend demo contexts are local-development mechanisms only.
-- AI chat uses a local guarded retrieval implementation and deterministic knowledge-base answer composition; external provider integration is not implemented.
-- Some dashboard routes are role-gated but still broad tenant-level summaries; deeper role-specific redaction can be expanded before production use.
-- `knowledge_ingest` worker handling is currently a placeholder in the background worker; ingestion is orchestrated by existing services/jobs but the worker path is not a full ingestion executor yet.
+Decision record: [ADR 0002](adr/0002-production-auth-and-tenant-resolution.md).
 
 ## Architecture Style
 
@@ -111,10 +88,10 @@ flowchart LR
     Admin["Admin user"]
     Employee["Employee user"]
     Customer["Customer user"]
-    Frontend["NextJS frontend\n(port 3002)"]
-    Backend["FastAPI backend\n(port 8002)"]
+    Frontend["NextJS frontend"]
+    Backend["FastAPI backend"]
     Worker["Background worker"]
-    Db["PostgreSQL\n(port 5434)"]
+    Db["PostgreSQL"]
     Storage["Local/file storage"]
     Ai["AI retrieval and chat services"]
 
@@ -140,11 +117,11 @@ flowchart TB
 
     subgraph BE["FastAPI backend"]
         Core["core\nconfig, db, context, permissions, observability"]
-        Platform["platform\nidentity, JWT, Google SSO, RBAC, audit"]
+        Platform["platform\nidentity, JWT, optional Google SSO, RBAC, audit"]
         Shared["shared\nfile assets, background job infrastructure"]
         Insurance["insurance\nplans, customers, policies, assignments, incidents, claims, appointments, support"]
         AI["ai\nknowledge docs, PDF extraction, chunks, retrieval, guarded chat"]
-        Dashboard["dashboard\nread-only metrics, charts, SLA projections"]
+        Dashboard["dashboard\nmetrics, charts, SLA alerts"]
     end
 
     Next --> Core
@@ -211,7 +188,7 @@ Must not own:
 Owns:
 
 - Organizations, users, memberships, roles and permissions.
-- Google SSO adapter.
+- Optional Google SSO adapter.
 - JWT session creation and validation.
 - Audit and login events.
 - Admin user management.
@@ -574,7 +551,92 @@ Major decisions must be captured in `docs/adr/` before implementation agents enc
 
 Each ADR must include context, decision, alternatives considered, consequences and review date.
 
-## Runtime Ports
+## Appendix A - Implementation Status
+
+Snapshot date: 2026-05-29.
+
+This appendix records the current source-code status. It is intentionally separate from the architecture narrative so portfolio readers can understand the design first and inspect implementation details second.
+
+### Source Layout
+
+- FastAPI backend: `backend/app`.
+- Next.js frontend: `frontend/app`.
+- Alembic migrations: `backend/alembic/versions`.
+- ADRs: `docs/adr`.
+- Backend tests: `backend/app/tests`.
+
+### Implemented Backend Surface
+
+| Domain | Implemented routes | Primary services |
+| --- | --- | --- |
+| Platform | `GET /me`, organizations, admin users, password reset, audit events, Google login metadata and Google callback | `AuthMembershipService`, `AdminUserService`, `AuditLogService` |
+| AI | `GET /ai/knowledge-documents`, document create/upload/ingest, `POST /ai/chat`, `POST /ai/retrieval/search` | `KnowledgeDocumentService`, `KnowledgeRetrievalService`, `GuardedChatbotService` |
+| Insurance portal | `GET /insurance/portal/summary`, portal policies/incidents/appointments/conversations, portal appointment and conversation commands | `CustomerPortalService` |
+| Workload queues | `GET /insurance/queues/my`, `GET /insurance/queues`, `GET /insurance/queues/{item_id}`, `POST /insurance/queues/{item_id}/actions` | `WorkloadQueueService` |
+| Claims | `GET /insurance/claims/{claim_id}`, history, transition command and claim-linked conversation command | `ClaimLifecycleService`, `InsuranceSupportService` |
+| Insurance core | Plans, customers, policies, assignments, incidents, appointments, conversations and messages | `InsurancePlanService`, `InsuranceCustomerPolicyService`, `InsuranceAssignmentService`, `InsuranceIncidentService`, `InsuranceSupportService` |
+| Dashboard | `GET /dashboard/summary`, charts, alerts and role dashboards | `DashboardAggregationService`, `SlaEvaluationService` |
+
+All reviewed list routes expose bounded `limit` parameters where they return potentially growing collections. Existing list envelopes still use the compatibility `{"items": [...]}` response from `ListResponse`; the richer `meta` envelope remains a target architecture improvement.
+
+### Implemented Persistence
+
+| Revision | Purpose |
+| --- | --- |
+| `0001_schema_backbone` | Creates the initial SQLAlchemy metadata schema. |
+| `0002_queue_fields` | Adds queue `priority` and `due_at` fields to workflow tables. |
+| `0003_claim_lifecycle` | Adds `claim_state` and claim transition history. |
+| `0004_insurance_message_ai_fields` | Adds insurance message `role` and `citations_json` for AI-assisted support replies. |
+| `0005_conversation_claim_link` | Adds optional `claim_id` links to insurance conversations. |
+| `0006_sla_persistence` | Adds SLA rules and SLA alerts. |
+
+Current insurance persistence includes plans, workflows, customers, policies, employee assignments, incident reports, claim transitions, appointments, conversations and messages.
+
+Current dashboard persistence includes `sla_rules` and `sla_alerts`.
+
+Current shared persistence includes file assets and background jobs. `sla_evaluate` is implemented as a background dispatch path. `knowledge_ingest` is accepted by the worker as a placeholder; MVP ingestion is currently service-driven and a full async ingestion worker is a planned improvement.
+
+### Implemented Frontend Surface
+
+| Route | Current behavior |
+| --- | --- |
+| `/` | Landing/admin task overview using demo data. |
+| `/admin` | Admin placeholder/dashboard surface using demo data. |
+| `/portal` | Customer portal backed by portal APIs, with appointment request and support conversation entry point. |
+| `/insurance` | Employee insurance operations queue backed by queue APIs, with incident reporting form. |
+| `/insurance/claims/[id]` | Claim detail page with state, timeline, transitions and support-thread entry point. |
+| `/ai` | Persisted support conversation list/thread UI with message composer and AI-assisted sends. |
+| `/dashboard` | API-driven metrics, chart rows and SLA alert table. |
+
+The frontend centralizes API access in `frontend/app/lib/api-client.ts`. Demo header context is local-development scaffolding and must be replaced by real bearer-token auth before production deployment.
+
+### Implemented Test Coverage
+
+The current tests cover:
+
+- Production-like auth and local demo header behavior.
+- Tenant isolation and object authorization helpers.
+- Customer portal summary/history/commands.
+- Workload queue list/detail/actions.
+- Claim lifecycle contract and service transitions.
+- Support conversation visibility, AI-assisted persistence and claim-linked thread creation.
+- Dashboard metrics, chart DTOs, SLA status classification and SLA evaluation idempotency.
+- Database metadata contract for queue fields, claim lifecycle, message AI fields, conversation claim links and SLA persistence.
+- Retrieval tenant scoping contract.
+- Trace id middleware and permissions.
+
+Verification checklist lives in `docs/PLAN.md`.
+
+### Known Implementation Gaps
+
+- `ListResponse` still lacks the planned `meta` object; list endpoints currently rely on bounded `limit` values and compatibility envelopes.
+- Mutation idempotency is documented but not fully implemented for every command class.
+- Demo header auth and hardcoded frontend demo contexts are local-development mechanisms only.
+- AI chat uses local guarded retrieval and deterministic knowledge-base answer composition; external provider integration is not implemented.
+- Some dashboard routes are role-gated but still broad tenant-level summaries; deeper role-specific redaction can be expanded before production use.
+- `knowledge_ingest` worker handling is currently a placeholder. For portfolio review, describe this as: MVP local ingestion via service; full async ingestion worker planned.
+
+## Appendix B - Local Runtime Ports
 
 - Frontend: `3002`
 - Backend: `8002`
