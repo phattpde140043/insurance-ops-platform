@@ -1,15 +1,31 @@
-# Insurance Operations Platform
+# Insurance Ops Platform
 
-Standalone project for Câu 2: an operations platform for insurance companies managing admins, employees and customers.
+Insurance Ops Platform is a modular full-stack system for managing insurance operations across customer self-service, employee workflows, claim lifecycle, support conversations, AI-assisted knowledge retrieval and SLA-driven dashboards.
 
-## Scope
+The platform is designed around tenant isolation, explicit domain boundaries, auditable workflow transitions and production-ready API contracts. It combines a FastAPI backend, SQLAlchemy/Alembic persistence, a Next.js frontend and a documented architecture roadmap with ADRs.
 
-- Google SSO adapter, JWT sessions, RBAC and audit history.
-- Insurance plan, customer, policy and employee assignment workflows.
-- Incident reports, appointments, conversations and support messages.
-- Role-specific dashboard API surface.
-- Company knowledge upload, PDF ingestion, retrieval and guarded chatbot flow.
-- Admin user management and traceable request logging.
+## Repository Description
+
+Insurance operations platform with FastAPI, Next.js, multi-tenant workflows, customer portal, claim lifecycle, support chat, AI knowledge retrieval, dashboards and SLA alerts.
+
+## Key Features
+
+- Multi-tenant authentication and role-aware request context.
+- Customer portal for policies, incidents, appointments and support conversations.
+- Employee workload queues with priority, due dates and assignment actions.
+- Governed claim lifecycle with explicit states, transitions and audit history.
+- Persisted support chat with optional AI-assisted answers and citations.
+- Knowledge document ingestion and guarded retrieval behavior.
+- Dashboard metrics, chart-ready APIs and SLA alert persistence.
+- Background job support for async workflow evaluation.
+- Architecture documentation, ADRs and verification checklist.
+
+## Tech Stack
+
+- Backend: FastAPI, SQLAlchemy, Alembic, Pydantic, Pytest.
+- Frontend: Next.js, React, TypeScript.
+- Data and ops: PostgreSQL-ready schema, Docker Compose, background jobs.
+- Architecture: modular monolith, bounded domains, C4 documentation and ADRs.
 
 ## Architecture
 
@@ -18,11 +34,13 @@ The backend follows explicit bounded modules:
 - `app.core`: configuration, database, auth context, permissions, storage and observability.
 - `app.domains.platform`: users, organizations, memberships, auth and audit.
 - `app.domains.shared`: file assets and background jobs.
-- `app.domains.insurance`: plans, customers, policies, assignments, incidents and support flows.
+- `app.domains.insurance`: plans, customers, policies, assignments, claims, queues and support flows.
 - `app.domains.ai`: knowledge bases, PDF ingestion, retrieval and guarded chat.
-- `app.domains.dashboard`: insurance-focused dashboard aggregation.
+- `app.domains.dashboard`: insurance-focused metrics, charts and SLA alerting.
 
-The frontend is a NextJS app focused on insurance operations, dashboards, AI support and admin.
+The frontend is a Next.js app focused on insurance operations, customer self-service, dashboards, AI support and admin workflows.
+
+See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) and [docs/PLAN.md](docs/PLAN.md) for the system architecture, ADRs and delivery roadmap.
 
 ## Local Run
 
