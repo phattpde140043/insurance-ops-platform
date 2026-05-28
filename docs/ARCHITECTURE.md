@@ -80,6 +80,33 @@ The current implementation uses service calls and audit records inside a modular
 | `SlaAlertRaised` | `dashboard` SLA evaluator | Dashboard, notification adapter, audit | Surface overdue claim/appointment/conversation work. |
 | `SlaAlertResolved` | `dashboard` SLA evaluator | Dashboard, audit | Remove noise when work is completed or no longer breached. |
 
+### Domain Event Delivery Model
+
+The production hardening path is a transactional outbox, not a distributed broker-first design. The owning domain writes its business state and event record in the same database transaction; a background worker dispatches committed events to in-process consumers, notification adapters or future external integrations.
+
+Recommended outbox table: `domain_outbox_events`.
+
+| Field | Purpose |
+| --- | --- |
+| `id` | Stable event id for tracing and deduplication. |
+| `organization_id` | Tenant partition and authorization boundary. |
+| `event_type` | Event name such as `IncidentReported` or `ClaimTransitioned`. |
+| `aggregate_type`, `aggregate_id` | Source aggregate identity. |
+| `producer_module` | Owning module, for example `insurance`, `ai` or `dashboard`. |
+| `payload_json` | Minimal safe payload with ids, state values and non-sensitive metadata. |
+| `idempotency_key` | Optional command/event dedupe key. |
+| `status`, `attempts`, `available_at`, `published_at` | Worker delivery state and retry control. |
+| `error_message` | Truncated operational error detail without PII. |
+| `created_at`, `updated_at` | Audit and worker ordering fields. |
+
+Outbox rules:
+
+- Business services must write the aggregate change and outbox event atomically.
+- Workers dispatch only committed events and mark delivery status with bounded retries.
+- Consumers must be idempotent because event delivery is at-least-once.
+- Payloads must not contain raw prompts, full support messages, uploaded document contents or full claim narratives.
+- The outbox is required for durable cross-module side effects such as notifications, SLA fan-out and future integration publishing; simple synchronous reads do not require events.
+
 ## Regulatory and Insurance Compliance
 
 This project is not a certified compliance product. The architecture is designed to be ready for common insurance and privacy controls.
@@ -460,6 +487,15 @@ AI guardrails:
 - Logs and audit metadata must not store raw prompts, raw uploaded document content or full assistant answers.
 - AI endpoints and AI-assisted message sends use the `ai-expensive` rate-limit tier.
 
+AI rate-limit and cost budget:
+
+- `POST /ai/chat`, support AI message sends, retrieval search and ingestion triggers belong to `ai-expensive`.
+- Apply a stricter per-user and per-tenant budget than normal writes; target defaults are 10 AI requests/minute per user and 60 AI requests/minute per tenant until production telemetry justifies a change.
+- Bound prompt size, retrieved chunk count, response size and provider timeout before making an external provider call.
+- Track provider latency, timeout/error outcome, model name and token/cost estimate in safe telemetry such as `AiProviderCall`; never store raw prompt text in audit metadata.
+- Return `429` with a safe retry hint when budget is exceeded; do not degrade by widening retrieval scope or bypassing citations.
+- Use worker concurrency limits for ingestion and long-running AI tasks so provider saturation cannot starve normal insurance operations.
+
 ### Dashboard and SLA
 
 1. `dashboard` queries source data through read-only repositories/projections.
@@ -501,7 +537,7 @@ Rate-limit tier definitions:
 | `auth-sensitive` | login, token exchange, auth verification | Strict per IP/user; log violations. |
 | `write-command` | create/update/transition/send commands | Moderate per user/tenant; define idempotency. |
 | `read-list` | list/search/filter endpoints | Higher per user/tenant; pagination required. |
-| `ai-expensive` | chat, retrieval, ingestion triggers | Strict per user/tenant; bound prompt/retrieval size. |
+| `ai-expensive` | chat, retrieval, ingestion triggers | Strict per user/tenant; bound prompt/retrieval size, provider timeout and worker concurrency. |
 | `internal-job` | worker-triggered evaluation/ingestion | Bound by worker concurrency and job idempotency. |
 
 ## Security and Tenancy Rules

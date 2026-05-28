@@ -1954,6 +1954,110 @@ Document and, where practical, script the platform-level verification flow acros
 - Manual smoke paths include expected successful and forbidden cases.
 - No unrelated refactors are introduced.
 
+### T08.1 - Add Transactional Domain Event Outbox
+
+**Status**
+
+- Pending.
+
+**Depends On**
+
+- T07.2.
+
+**JTBD**
+
+As a maintainer, I need reliable cross-module domain event delivery so claim, incident, support, SLA and notification side effects cannot be lost after a successful database write.
+
+**Description**
+
+Add a transactional outbox for domain events inside the modular monolith. This keeps the current single-database architecture while preventing the failure mode where a business transaction commits but an event dispatch or background side effect is lost.
+
+**Implementation**
+
+- Add an additive migration for `domain_outbox_events` with tenant, event type, aggregate identity, producer module, safe payload, idempotency key, status, attempts, retry timestamps and truncated error fields.
+- Add a shared outbox repository/service that can append events inside the same SQLAlchemy transaction as the owning domain change.
+- Emit outbox events from high-value workflows first: incident report, claim transition, appointment request, support conversation start/message send, knowledge document ingestion and SLA alert raise/resolve.
+- Add a background worker dispatcher with bounded batch size, retry limit, status updates and safe error metadata.
+- Make event consumers idempotent by event id or aggregate/idempotency key.
+- Keep payloads PII-safe: ids, state values, reason categories and citation ids only; no raw prompts, full messages, uploaded documents or full claim narratives.
+
+**Acceptance Criteria**
+
+- Business write and outbox insert happen in one transaction for the selected workflows.
+- Re-running the dispatcher does not duplicate SLA alerts, notifications or audit side effects.
+- Failed dispatch attempts are retried with bounded attempts and visible status.
+- Outbox queries are tenant/index-friendly and do not full-scan pending events.
+- Tests cover successful dispatch, retry behavior, duplicate event delivery and PII-safe payload shape.
+
+### T08.2 - Enforce AI Rate Limit and Provider Budget
+
+**Status**
+
+- Pending.
+
+**Depends On**
+
+- T08.1.
+
+**JTBD**
+
+As a platform operator, I need AI usage bounded by user, tenant and worker budgets so external provider cost, latency and rate-limit failures cannot degrade the whole insurance platform.
+
+**Description**
+
+Implement the `ai-expensive` tier as an enforceable policy for chat, retrieval and ingestion triggers. AI endpoints should fail safely under load and preserve tenant-scoped RAG guardrails.
+
+**Implementation**
+
+- Add rate-limit configuration for `ai-expensive` with stricter per-user and per-tenant defaults than normal writes.
+- Apply the tier to `POST /ai/chat`, support AI-assisted message send, retrieval search and knowledge ingestion trigger endpoints.
+- Bound prompt size, retrieved chunk count, assistant response size, provider timeout and concurrent ingestion/AI worker jobs.
+- Persist safe provider telemetry such as model, timeout/error status, latency and token/cost estimate without raw prompts or full retrieved source text.
+- Return `429` with safe retry guidance when a user or tenant exceeds budget.
+- Add tests for per-user limit, per-tenant limit, provider timeout fallback, no-source fallback and prompt/log redaction.
+
+**Acceptance Criteria**
+
+- AI endpoints cannot exceed configured per-user or per-tenant request budgets.
+- Provider timeout/error returns a safe fallback without losing the original user message.
+- Rate-limit violations do not widen retrieval scope, skip tenant filtering or bypass citation requirements.
+- Provider telemetry is useful for operations while remaining PII-safe.
+- Normal insurance read/write endpoints continue to work when AI budget is exhausted.
+
+### T08.3 - Complete Command Idempotency Hardening
+
+**Status**
+
+- Pending.
+
+**Depends On**
+
+- T08.2.
+
+**JTBD**
+
+As a customer or employee on an unreliable network, I need retried create, send and transition commands to be safe so duplicate clicks or retrying clients do not create duplicate claims, messages, appointments or invalid history.
+
+**Description**
+
+Turn the documented idempotency matrix into implementation for high-risk mutation endpoints before external production traffic.
+
+**Implementation**
+
+- Add shared idempotency persistence keyed by organization, actor, endpoint/command name and `X-Idempotency-Key`.
+- Apply explicit retry behavior to incident creation, appointment request, support message send, AI-assisted message send and claim transition commands.
+- For claim transitions, combine the idempotency key with state-machine validation so identical retries return the original transition and conflicting retries return a clear conflict.
+- Store only response references and safe metadata in idempotency records, not full request bodies containing PII.
+- Add tests for duplicate key same payload, duplicate key conflicting payload, missing key where required and concurrent retry behavior.
+
+**Acceptance Criteria**
+
+- Retryable command endpoints document and enforce their idempotency behavior.
+- Repeating the same command with the same key returns the existing result or a safe no-op.
+- Reusing a key with conflicting payload returns a deterministic conflict response.
+- Idempotency records are tenant-scoped and cannot be used across organizations.
+- Audit metadata remains PII-safe and includes enough trace context to investigate duplicate submissions.
+
 ## Verification Checklist
 
 Use this checklist after feature work that touches auth, tenant data, insurance workflows, AI chat or dashboards.
