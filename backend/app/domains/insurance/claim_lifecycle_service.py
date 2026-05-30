@@ -11,6 +11,8 @@ from app.domains.insurance.repositories import (
 )
 from app.domains.insurance.schemas import CreateClaimTransitionIn
 from app.domains.platform.audit_service import AuditEventCreate, AuditLogService
+from app.domains.shared.outbox_service import DomainOutboxService
+from app.domains.shared.idempotency_service import IdempotencyService
 
 
 ALLOWED_TRANSITIONS = {
@@ -49,7 +51,9 @@ class ClaimLifecycleService:
             self.transitions = InsuranceClaimTransitionRepository(session)
             self.customers = InsuranceCustomerRepository(session)
             self.assignments = InsuranceEmployeeAssignmentRepository(session)
-            self.audit_log = AuditLogService(session)
+        self.audit_log = AuditLogService(session)
+        self.outbox = DomainOutboxService(session)
+        self.idempotency = IdempotencyService(session)
 
     def can_transition(self, from_state: str, to_state: str, role: str) -> bool:
         return (from_state, to_state, role) in ALLOWED_TRANSITIONS
@@ -95,7 +99,7 @@ class ClaimLifecycleService:
             claim=claim,
         )
         history = await self.transitions.list_for_claim(
-            organization_id, claim_id, limit=min(max(limit, 1), 100)
+            organization_id, claim_id, limit=min(max(limit, 1), 101)
         )
         return [self._serialize_transition(transition) for transition in history]
 
@@ -106,6 +110,7 @@ class ClaimLifecycleService:
         claim_id: str,
         actor_user_id: str,
         role: str,
+        idempotency_key: str,
         payload: CreateClaimTransitionIn,
     ) -> dict:
         claim = await self._get_claim(organization_id, claim_id)
@@ -115,6 +120,19 @@ class ClaimLifecycleService:
             role=role,
             claim=claim,
         )
+        reservation = await self.idempotency.reserve(
+            organization_id=organization_id,
+            actor_user_id=actor_user_id,
+            command_name="insurance.transition_claim",
+            idempotency_key=idempotency_key,
+            fingerprint_payload={
+                "claim_id": claim_id,
+                "to_state": payload.to_state,
+                "reason": payload.reason,
+            },
+        )
+        if reservation.replayed:
+            return self._serialize_claim(claim, role=role)
         reason = payload.reason.strip()
         if not reason:
             raise HTTPException(
@@ -165,6 +183,26 @@ class ClaimLifecycleService:
                     "to_state": payload.to_state,
                 },
             )
+        )
+        outbox = getattr(self, "outbox", None)
+        if outbox is not None:
+            await outbox.append(
+                organization_id=organization_id,
+                event_type="ClaimTransitioned",
+                aggregate_type="insurance_claim",
+                aggregate_id=claim.id,
+                producer_module="insurance",
+                payload={
+                    "from_state": previous_state,
+                    "to_state": payload.to_state,
+                },
+                idempotency_key=idempotency_key,
+            )
+        self.idempotency.complete(
+            reservation,
+            resource_type="insurance_claim_transition",
+            resource_id=transition.id,
+            response_metadata={"claim_id": claim.id, "to_state": payload.to_state},
         )
         if self.session is not None:
             await self.session.commit()

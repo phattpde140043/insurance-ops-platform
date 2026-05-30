@@ -75,6 +75,26 @@ async def test_bearer_token_auth_works_in_production_mode(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
+async def test_malformed_bearer_token_is_rejected_in_production_mode(monkeypatch) -> None:
+    monkeypatch.setattr(context.settings, "environment", "production")
+    monkeypatch.setattr(context.settings, "demo_header_auth_enabled", False)
+
+    with pytest.raises(HTTPException) as exc:
+        await context.get_auth_provider(
+            credentials=HTTPAuthorizationCredentials(
+                scheme="Bearer",
+                credentials="not-a-valid-jwt",
+            ),
+            organization_id="spoofed_org",
+            header_user_id="spoofed_user",
+            role="admin",
+        )
+
+    assert exc.value.status_code == 401
+    assert exc.value.detail["code"] == "invalid_access_token"
+
+
+@pytest.mark.asyncio
 async def test_invalid_demo_role_is_rejected(monkeypatch) -> None:
     monkeypatch.setattr(context.settings, "environment", "local")
     monkeypatch.setattr(context.settings, "demo_header_auth_enabled", True)

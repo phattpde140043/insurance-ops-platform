@@ -13,6 +13,8 @@ from app.domains.insurance.repositories import (
 )
 from app.domains.insurance.schemas import CreateCustomerIn, CreatePolicyIn
 from app.domains.platform.audit_service import AuditEventCreate, AuditLogService
+from app.domains.shared.idempotency_service import IdempotencyService
+from app.domains.shared.outbox_service import DomainOutboxService
 
 
 class InsuranceCustomerPolicyService:
@@ -23,6 +25,8 @@ class InsuranceCustomerPolicyService:
         self.plans = InsurancePlanRepository(session)
         self.policies = InsurancePolicyRepository(session)
         self.audit_log = AuditLogService(session)
+        self.outbox = DomainOutboxService(session)
+        self.idempotency = IdempotencyService(session)
 
     async def list_customers(
         self,
@@ -79,8 +83,22 @@ class InsuranceCustomerPolicyService:
         *,
         organization_id: str,
         actor_user_id: str,
+        idempotency_key: str,
         payload: CreatePolicyIn,
     ) -> dict:
+        reservation = await self.idempotency.reserve(
+            organization_id=organization_id,
+            actor_user_id=actor_user_id,
+            command_name="insurance.create_policy",
+            idempotency_key=idempotency_key,
+            fingerprint_payload=payload.model_dump(),
+        )
+        if reservation.replayed and reservation.record.resource_id:
+            existing = await self.policies.get_for_org(
+                organization_id, reservation.record.resource_id
+            )
+            if existing is not None:
+                return self._serialize_policy(existing)
         customer = await self.customers.get_for_org(organization_id, payload.customer_id)
         if customer is None:
             raise HTTPException(
@@ -117,6 +135,21 @@ class InsuranceCustomerPolicyService:
                 resource_id=policy.id,
                 metadata={"customer_id": payload.customer_id, "plan_id": payload.plan_id},
             )
+        )
+        if policy.status == "active":
+            await self.outbox.append(
+                organization_id=organization_id,
+                event_type="PolicyActivated",
+                aggregate_type="insurance_policy",
+                aggregate_id=policy.id,
+                producer_module="insurance",
+                payload={"customer_id": payload.customer_id},
+                idempotency_key=idempotency_key,
+            )
+        self.idempotency.complete(
+            reservation,
+            resource_type="insurance_policy",
+            resource_id=policy.id,
         )
         await self.session.commit()
         return self._serialize_policy(policy)

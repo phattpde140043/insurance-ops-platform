@@ -4,13 +4,16 @@ from pydantic import BaseModel
 class GoogleLoginOut(BaseModel):
     provider: str
     client_id: str
+    callback_url: str
     scope: str
     response_type: str
+    state: str
     next_step: str
 
 
 class GoogleCallbackIn(BaseModel):
     id_token: str
+    state: str | None = None
 
 
 class GoogleProfileOut(BaseModel):

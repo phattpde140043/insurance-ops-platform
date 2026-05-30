@@ -69,6 +69,14 @@ class FakeAuditLog:
         return event
 
 
+class FakeIdempotency:
+    async def reserve(self, **_kwargs):
+        return SimpleNamespace(replayed=False, record=SimpleNamespace())
+
+    def complete(self, *_args, **_kwargs) -> None:
+        pass
+
+
 def build_service(claim) -> ClaimLifecycleService:
     service = ClaimLifecycleService.__new__(ClaimLifecycleService)
     service.session = FakeSession()
@@ -77,6 +85,7 @@ def build_service(claim) -> ClaimLifecycleService:
     service.assignments = FakeAssignments()
     service.customers = FakeCustomers()
     service.audit_log = FakeAuditLog()
+    service.idempotency = FakeIdempotency()
     return service
 
 
@@ -103,6 +112,7 @@ async def test_employee_can_transition_assigned_claim_and_records_history() -> N
         claim_id="incident_1",
         actor_user_id="user_employee",
         role="employee",
+        idempotency_key="transition-1",
         payload=CreateClaimTransitionIn(to_state="triage", reason="Ready for triage"),
     )
 
@@ -139,6 +149,7 @@ async def test_invalid_transition_is_rejected() -> None:
             claim_id="incident_1",
             actor_user_id="user_employee",
             role="employee",
+            idempotency_key="transition-invalid",
             payload=CreateClaimTransitionIn(to_state="approved", reason="Skip ahead"),
         )
 

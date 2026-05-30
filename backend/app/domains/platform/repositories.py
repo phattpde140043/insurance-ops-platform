@@ -37,14 +37,14 @@ class AuditEventRepository(BaseRepository[AuditEvent]):
         super().__init__(session, AuditEvent)
 
     async def list_recent_for_org(
-        self, organization_id: str, *, limit: int = 50
+        self, organization_id: str, *, limit: int = 50, offset: int = 0
     ) -> Sequence[AuditEvent]:
         statement = (
             select(AuditEvent)
             .where(AuditEvent.organization_id == organization_id)
             .order_by(AuditEvent.created_at.desc())
             .limit(limit)
+            .offset(offset)
         )
         result = await self.session.scalars(statement)
         return result.all()
-

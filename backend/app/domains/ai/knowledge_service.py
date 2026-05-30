@@ -1,7 +1,8 @@
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.model_mixins import new_id
-from app.core.storage import LocalStorageProvider, StorageProvider
+from app.core.config import settings
+from app.core.storage import StorageProvider, get_storage_provider
 from fastapi import HTTPException, status
 
 from app.domains.ai.models import KnowledgeChunk, KnowledgeDocument
@@ -13,6 +14,8 @@ from app.domains.platform.audit_service import AuditEventCreate, AuditLogService
 from app.domains.shared.file_service import FileService, FileUploadCreate
 from app.domains.shared.job_service import BackgroundJobService, BackgroundJobType
 from app.domains.shared.repositories import FileAssetRepository
+from app.domains.shared.outbox_service import DomainOutboxService
+from app.domains.ai.budget_service import AiBudgetService
 
 
 class KnowledgeDocumentService:
@@ -24,6 +27,8 @@ class KnowledgeDocumentService:
         self.audit_log = AuditLogService(session)
         self.jobs = BackgroundJobService(session)
         self.embeddings = LocalHashEmbeddingReferenceProvider()
+        self.outbox = DomainOutboxService(session)
+        self.budget = AiBudgetService(session)
 
     async def list_documents(self, organization_id: str, *, limit: int = 50) -> list[dict]:
         documents = await self.documents.list_recent_for_org(
@@ -98,6 +103,12 @@ class KnowledgeDocumentService:
         actor_user_id: str,
         document_id: str,
     ) -> dict:
+        await self.budget.consume(
+            organization_id=organization_id,
+            user_id=actor_user_id,
+            capability="knowledge_ingest",
+        )
+        await self.budget.ensure_ingest_capacity(organization_id=organization_id)
         document = await self.documents.get_for_org(organization_id, document_id)
         if document is None:
             raise HTTPException(
@@ -113,9 +124,42 @@ class KnowledgeDocumentService:
             job_type=BackgroundJobType.KNOWLEDGE_INGEST.value,
             resource_type="knowledge_document",
             resource_id=document.id,
-            payload={"document_id": document.id},
+            payload={"document_id": document.id, "actor_user_id": actor_user_id},
         )
+        document.status = "queued"
+        await self.session.commit()
+        return {
+            "status": "queued",
+            "background_job_id": job.id,
+            "chunk_count": 0,
+        }
+
+    async def process_ingest_job(
+        self,
+        *,
+        organization_id: str,
+        actor_user_id: str | None,
+        document_id: str,
+        background_job_id: str,
+    ) -> int:
+        document = await self.documents.get_for_org(organization_id, document_id)
+        if document is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail={
+                    "code": "knowledge_document_not_found",
+                    "message": "Knowledge document was not found.",
+                },
+            )
+        if document.status == "ingested":
+            return len(
+                await self.chunks.list_for_document(organization_id, document.id)
+            )
+        document.status = "processing"
+        await self.session.commit()
+
         chunk_contents = await self._extract_chunks(document)
+        await self.chunks.delete_for_document(organization_id, document.id)
         for index, content in enumerate(chunk_contents):
             await self.chunks.add(
                 KnowledgeChunk(
@@ -138,15 +182,50 @@ class KnowledgeDocumentService:
                 action="ai.knowledge_document_ingested",
                 resource_type="knowledge_document",
                 resource_id=document.id,
-                metadata={"background_job_id": job.id, "chunk_count": len(chunk_contents)},
+                metadata={
+                    "background_job_id": background_job_id,
+                    "chunk_count": len(chunk_contents),
+                },
             )
         )
+        await self.outbox.append(
+            organization_id=organization_id,
+            event_type="KnowledgeDocumentIngested",
+            aggregate_type="knowledge_document",
+            aggregate_id=document.id,
+            producer_module="ai",
+            payload={"chunk_count": len(chunk_contents)},
+        )
         await self.session.commit()
-        return {
-            "status": "queued",
-            "background_job_id": job.id,
-            "chunk_count": len(chunk_contents),
-        }
+        return len(chunk_contents)
+
+    async def mark_ingest_failed(
+        self, *, organization_id: str, document_id: str
+    ) -> None:
+        document = await self.documents.get_for_org(organization_id, document_id)
+        if document is not None:
+            document.status = "failed"
+            await self.session.commit()
+
+    async def create_download_reference(
+        self, *, organization_id: str, document_id: str
+    ) -> dict:
+        document = await self.documents.get_for_org(organization_id, document_id)
+        if document is None or document.file_asset_id is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail={
+                    "code": "knowledge_document_file_not_found",
+                    "message": "Knowledge document file was not found.",
+                },
+            )
+        return await FileService(
+            self.session, get_storage_provider()
+        ).create_download_reference(
+            organization_id=organization_id,
+            file_asset_id=document.file_asset_id,
+            proxy_path=f"{settings.api_prefix}/ai/downloads/content",
+        )
 
     async def _extract_chunks(self, document: KnowledgeDocument) -> list[str]:
         if document.file_asset_id:
@@ -154,7 +233,7 @@ class KnowledgeDocumentService:
                 document.organization_id, document.file_asset_id
             )
             if asset and asset.mime_type == "application/pdf":
-                content = await LocalStorageProvider().get_bytes(asset.storage_key)
+                content = await get_storage_provider().get_bytes(asset.storage_key)
                 chunks = chunk_text(PdfExtractionService().extract_text(content))
                 if chunks:
                     return chunks

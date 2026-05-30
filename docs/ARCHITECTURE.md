@@ -539,7 +539,9 @@ AI evaluation and semantic guardrails:
 
 - API routes live under `/api/v1`.
 - Collections must return `items` plus pagination metadata, or document a compatibility exception while migrating existing `ListResponse` usages.
-- Every list endpoint must define maximum `limit`, deterministic sorting and tenant-scoped filters.
+- **Enforcement Path:** Any new list route, or any existing list route modified during feature updates, MUST implement the standard paginated `meta` envelope. Returning bare collection arrays is strictly prohibited for production paths.
+- Every list endpoint must define maximum `limit` (strictly capped at 100), deterministic sorting and tenant-scoped filters.
+- **Index Gate:** Every list endpoint query shape MUST be validated against the `Query and Index Budget` indexes. Adding high-volume query filters without corresponding composite index migrations is forbidden.
 - Every endpoint must have a rate-limit tier: `auth-sensitive`, `write-command`, `read-list`, `ai-expensive` or `internal-job`.
 - DTOs are explicit Pydantic schemas; ORM models must not be returned directly.
 - Commands must define idempotency behavior: `X-Idempotency-Key`, get-or-create, repeat-safe state transition or documented non-retryable command.
@@ -595,6 +597,9 @@ Rate-limit tier definitions:
 ## Idempotency, Audit and PII Rules
 
 Mutation endpoints must define retry behavior before implementation.
+
+- **Strict Validation:** All mutation endpoints involving payment, coverage enrollment, claim state transition, conversation start, or message sends MUST validate idempotency at the database/service layer.
+- **Key Mandatory Rule:** Clients must supply a unique `X-Idempotency-Key` in headers for retry safety. Duplicate requests within a 5-minute window must return the cached response or a `409 Conflict` if the initial request is in-flight.
 
 | Command class | Idempotency strategy | Duplicate behavior | Audit requirement |
 | --- | --- | --- | --- |
@@ -675,7 +680,7 @@ Required async workflow rules:
 - No fire-and-forget work inside request handlers.
 - Job payloads include tenant id, trace id, job type, idempotency key where applicable and minimal resource references.
 - Jobs define retry, dedupe and poison-job behavior.
-- PDF ingestion, SLA evaluation and potentially long AI answer generation should use background jobs when request latency or reliability requires it.
+- **Asynchronous Execution Model:** PDF ingestion and AI retrieval processing (`knowledge_ingest`) MUST be run as asynchronous background jobs to prevent blocking the synchronous FastAPI request thread and causing database connection starvation under load.
 
 ## Migration Strategy
 
@@ -791,10 +796,25 @@ Verification checklist lives in `docs/PLAN.md`.
 - Demo header auth and hardcoded frontend demo contexts are local-development mechanisms only.
 - AI chat uses local guarded retrieval and deterministic knowledge-base answer composition; external provider integration is not implemented.
 - Some dashboard routes are role-gated but still broad tenant-level summaries; deeper role-specific redaction can be expanded before production use.
-- `knowledge_ingest` worker handling is currently a placeholder. For portfolio review, describe this as: MVP local ingestion via service; full async ingestion worker planned.
+- `knowledge_ingest` worker handling is currently a placeholder. For portfolio review, describe this as: MVP local ingestion via service; full async ingestion worker using `shared` job queue planned to prevent connection pool exhaustion.
 
 ## Appendix B - Local Runtime Ports
 
 - Frontend: `3002`
 - Backend: `8002`
 - PostgreSQL: `5434`
+
+## 24. Production Readiness Roadmap
+
+Priority order for the remaining production-grade architecture gaps:
+
+1. Disable or strictly environment-gate demo header authentication in production-like configuration.
+2. Add fail-closed production Google SSO mode with configured Google client ID.
+3. Implement durable worker claiming for SLA evaluation and PDF ingestion jobs.
+4. Integrate private S3/MinIO-compatible object storage provider instead of local file storage.
+5. Complete reviewer correction UI: edit, save, approve and detailed claim correction history.
+6. Implement real export artifact generation and download with expiring references.
+7. Add pagination metadata and cursor envelopes for admin, audit and customer portal lists.
+8. Add frontend fetch timeout, retry policies and backend-unavailable UI states.
+9. Establish Outbox Pattern for domain events to ensure transactional consistency.
+10. Add E2E smoke tests for portal upload -> incident triage -> claim transition -> export.

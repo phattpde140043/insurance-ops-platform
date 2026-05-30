@@ -6,6 +6,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.context import RequestContext, get_request_context, require_roles
 from app.core.database import get_db_session
 from app.domains.dashboard.service import DashboardAggregationService
+from app.domains.shared.schemas import (
+    ListResponse,
+    decode_offset_cursor,
+    encode_offset_cursor,
+    paginated_response,
+)
 
 router = APIRouter(prefix="/dashboard", tags=["dashboard"])
 
@@ -33,21 +39,41 @@ async def get_charts(
     return await service.get_chart_series(organization_id=context.organization_id)
 
 
-@router.get("/alerts")
+@router.get("/alerts", response_model=ListResponse[dict])
 async def list_sla_alerts(
     context: Annotated[RequestContext, Depends(require_roles("admin"))],
     session: Annotated[AsyncSession, Depends(get_db_session)],
     status: str | None = None,
     limit: Annotated[int, Query(ge=1, le=100)] = 25,
+    cursor: str | None = None,
 ) -> dict:
     service = DashboardAggregationService(session)
-    return {
-        "items": await service.list_sla_alerts(
+    offset = decode_offset_cursor(cursor)
+    items = await service.list_sla_alerts(
             organization_id=context.organization_id,
             status=status,
-            limit=limit,
+            limit=limit + 1,
+            offset=offset,
         )
-    }
+    return paginated_response(
+        items,
+        limit=limit,
+        sort="-breached_at",
+        offset=offset,
+        next_cursor=encode_offset_cursor(offset + limit),
+    )
+
+
+@router.post("/reconcile")
+async def reconcile_dashboard_read_models(
+    context: Annotated[RequestContext, Depends(require_roles("admin"))],
+    session: Annotated[AsyncSession, Depends(get_db_session)],
+) -> dict:
+    service = DashboardAggregationService(session)
+    return await service.queue_reconciliation(
+        organization_id=context.organization_id,
+        actor_user_id=context.user_id,
+    )
 
 
 @router.get("/admin")

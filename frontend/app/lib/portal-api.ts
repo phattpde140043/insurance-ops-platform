@@ -1,13 +1,9 @@
-import { apiGet, apiPost } from "./api-client";
+import { apiGet, apiPost, type PaginatedResponse } from "./api-client";
 
 const customerDemoContext = {
   organizationId: "org_demo",
   userId: "user_customer",
   role: "customer"
-};
-
-type ListResponse<T> = {
-  items: T[];
 };
 
 export type PortalCustomer = {
@@ -59,7 +55,7 @@ export async function getPortalSummary(): Promise<PortalSummary> {
 }
 
 export async function getPortalPolicies(): Promise<PortalPolicy[]> {
-  const response = await apiGet<ListResponse<PortalPolicy>>(
+  const response = await apiGet<PaginatedResponse<PortalPolicy>>(
     "/insurance/portal/policies",
     customerDemoContext
   );
@@ -67,7 +63,7 @@ export async function getPortalPolicies(): Promise<PortalPolicy[]> {
 }
 
 export async function getPortalIncidents(): Promise<PortalIncident[]> {
-  const response = await apiGet<ListResponse<PortalIncident>>(
+  const response = await apiGet<PaginatedResponse<PortalIncident>>(
     "/insurance/portal/incidents",
     customerDemoContext
   );

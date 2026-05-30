@@ -75,18 +75,29 @@ class FakeMessageRepository:
         self.messages = messages
 
     async def list_for_conversation(
-        self, organization_id: str, conversation_id: str, *, limit: int = 50
+        self,
+        organization_id: str,
+        conversation_id: str,
+        *,
+        limit: int = 50,
+        offset: int = 0,
     ):
         return [
             message
             for message in self.messages
             if message.organization_id == organization_id
             and message.conversation_id == conversation_id
-        ][:limit]
+        ][offset : offset + limit]
 
     async def add(self, message):
         self.messages.append(message)
         return message
+
+    async def get_for_org(self, organization_id: str, message_id: str):
+        for message in self.messages:
+            if message.organization_id == organization_id and message.id == message_id:
+                return message
+        return None
 
 
 class FakeAssignments:
@@ -127,6 +138,19 @@ class FakeSession:
 
     async def commit(self) -> None:
         self.committed = True
+
+
+class FakeIdempotency:
+    def __init__(self) -> None:
+        self.replayed = False
+        self.record = SimpleNamespace(resource_id=None)
+
+    async def reserve(self, **_kwargs):
+        return SimpleNamespace(replayed=self.replayed, record=self.record)
+
+    def complete(self, *_args, **kwargs) -> None:
+        self.record.resource_id = kwargs["resource_id"]
+        self.replayed = True
 
 
 class FakeChatbot:
@@ -173,6 +197,7 @@ def build_service(conversations, messages) -> InsuranceSupportService:
     service.claims = FakeClaimRepository()
     service.chatbot = FakeChatbot()
     service.audit_log = FakeAuditLog()
+    service.idempotency = FakeIdempotency()
     return service
 
 
@@ -248,6 +273,7 @@ async def test_message_history_is_bounded_and_create_requires_access() -> None:
         actor_user_id="user_customer",
         role="customer",
         conversation_id="conversation_1",
+        idempotency_key="message-1",
         payload=CreateMessageIn(body="Adding context"),
     )
 
@@ -265,6 +291,7 @@ async def test_ai_response_is_persisted_in_same_conversation() -> None:
         actor_user_id="user_customer",
         role="customer",
         conversation_id="conversation_1",
+        idempotency_key="message-ai-1",
         payload=CreateMessageIn(body="What is covered?", use_ai=True),
     )
 
@@ -272,6 +299,49 @@ async def test_ai_response_is_persisted_in_same_conversation() -> None:
     assert [message.role for message in stored_messages] == ["user", "assistant"]
     assert stored_messages[1].conversation_id == "conversation_1"
     assert stored_messages[1].citations_json == {"chunk_ids": []}
+    assert service.conversations.conversations[0].needs_human is True
+    assert service.conversations.conversations[0].handoff_reason == "ai_no_source"
+
+
+@pytest.mark.asyncio
+async def test_employee_reply_clears_handoff_in_same_conversation() -> None:
+    conversation = build_conversation("conversation_1", "customer_lan", "user_employee")
+    conversation.needs_human = True
+    conversation.handoff_reason = "ai_no_source"
+    service = build_service([conversation], [])
+
+    message = await service.create_message(
+        organization_id="org_demo",
+        actor_user_id="user_employee",
+        role="employee",
+        conversation_id="conversation_1",
+        idempotency_key="employee-reply-1",
+        payload=CreateMessageIn(body="I can help with this."),
+    )
+
+    assert message["role"] == "employee"
+    assert conversation.needs_human is False
+    assert conversation.employee_user_id == "user_employee"
+
+
+@pytest.mark.asyncio
+async def test_duplicate_ai_retry_does_not_duplicate_assistant_message() -> None:
+    service = build_service([build_conversation("conversation_1", "customer_lan")], [])
+
+    for _attempt in range(2):
+        await service.create_message(
+            organization_id="org_demo",
+            actor_user_id="user_customer",
+            role="customer",
+            conversation_id="conversation_1",
+            idempotency_key="message-ai-retry",
+            payload=CreateMessageIn(body="What is covered?", use_ai=True),
+        )
+
+    assert [message.role for message in service.messages.messages] == [
+        "user",
+        "assistant",
+    ]
 
 
 @pytest.mark.asyncio
@@ -283,6 +353,7 @@ async def test_open_claim_conversation_creates_claim_linked_thread() -> None:
         actor_user_id="user_employee",
         role="employee",
         claim_id="incident_1",
+        idempotency_key="claim-conversation-1",
     )
 
     assert result["claim_id"] == "incident_1"

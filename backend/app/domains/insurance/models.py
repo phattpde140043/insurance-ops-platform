@@ -1,6 +1,6 @@
-from datetime import date
+from datetime import date, datetime
 
-from sqlalchemy import Date, ForeignKey, Integer, JSON, String, Text, UniqueConstraint
+from sqlalchemy import Boolean, Date, DateTime, ForeignKey, Integer, JSON, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.core.database import Base
@@ -101,6 +101,22 @@ class InsuranceClaimTransition(IdMixin, TenantMixin, TimestampMixin, Base):
     reason: Mapped[str] = mapped_column(Text, nullable=False)
 
 
+class InsuranceClaimCorrection(IdMixin, TenantMixin, TimestampMixin, Base):
+    __tablename__ = "insurance_claim_corrections"
+
+    claim_id: Mapped[str] = mapped_column(
+        ForeignKey("insurance_incident_reports.id"), index=True, nullable=False
+    )
+    reviewer_user_id: Mapped[str] = mapped_column(
+        ForeignKey("users.id"), index=True, nullable=False
+    )
+    status: Mapped[str] = mapped_column(String(40), index=True, nullable=False)
+    corrected_fields: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
+    changed_fields: Mapped[list] = mapped_column(JSON, default=list, nullable=False)
+    approved_by_user_id: Mapped[str | None] = mapped_column(ForeignKey("users.id"))
+    approved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
 class InsuranceAppointment(IdMixin, TenantMixin, TimestampMixin, Base):
     __tablename__ = "insurance_appointments"
 
@@ -127,6 +143,8 @@ class InsuranceConversation(IdMixin, TenantMixin, TimestampMixin, Base):
     status: Mapped[str] = mapped_column(String(60), index=True, nullable=False)
     priority: Mapped[str] = mapped_column(String(40), default="normal", nullable=False)
     due_at: Mapped[str | None] = mapped_column(String(80), index=True)
+    needs_human: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    handoff_reason: Mapped[str | None] = mapped_column(String(80), index=True)
 
 
 class InsuranceMessage(IdMixin, TenantMixin, TimestampMixin, Base):

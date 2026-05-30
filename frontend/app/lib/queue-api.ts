@@ -1,13 +1,9 @@
-import { apiGet } from "./api-client";
+import { apiGet, type PaginatedResponse } from "./api-client";
 
 const employeeDemoContext = {
   organizationId: "org_demo",
   userId: "user_employee",
   role: "employee"
-};
-
-type ListResponse<T> = {
-  items: T[];
 };
 
 export type QueueItem = {
@@ -23,7 +19,7 @@ export type QueueItem = {
 };
 
 export async function getMyQueue(): Promise<QueueItem[]> {
-  const response = await apiGet<ListResponse<QueueItem>>(
+  const response = await apiGet<PaginatedResponse<QueueItem>>(
     "/insurance/queues/my",
     employeeDemoContext
   );

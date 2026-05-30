@@ -1,9 +1,12 @@
 import { ClaimActions } from "./claim-actions";
+import { CorrectionActions } from "./correction-actions";
 import {
   getClaimDetail,
   getClaimHistory,
+  getClaimCorrections,
   type ClaimDetail,
-  type ClaimTransition
+  type ClaimTransition,
+  type ClaimCorrection
 } from "../../../lib/claim-api";
 
 type ClaimPageProps = {
@@ -14,12 +17,14 @@ export default async function ClaimPage({ params }: ClaimPageProps) {
   const { id } = await params;
   let claim: ClaimDetail | null = null;
   let history: ClaimTransition[] = [];
+  let corrections: ClaimCorrection[] = [];
   let error = "";
 
   try {
-    [claim, history] = await Promise.all([
+    [claim, history, corrections] = await Promise.all([
       getClaimDetail(id),
-      getClaimHistory(id)
+      getClaimHistory(id),
+      getClaimCorrections(id)
     ]);
   } catch (requestError) {
     error =
@@ -100,6 +105,15 @@ export default async function ClaimPage({ params }: ClaimPageProps) {
             ))}
           </div>
         )}
+      </section>
+
+      <section className="panel">
+        <h3>Reviewer corrections</h3>
+        <CorrectionActions
+          claimId={claim.id}
+          incidentType={claim.incident_type}
+          corrections={corrections}
+        />
       </section>
     </div>
   );

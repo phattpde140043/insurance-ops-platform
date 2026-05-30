@@ -31,6 +31,11 @@ class KnowledgeIngestOut(BaseModel):
     chunk_count: int
 
 
+class KnowledgeDownloadOut(BaseModel):
+    download_url: str
+    expires_in: int
+
+
 class RetrievalSearchIn(BaseModel):
     query: str
     limit: int = 5
@@ -45,3 +50,19 @@ class RetrievalChunkOut(BaseModel):
 
 class RetrievalSearchOut(BaseModel):
     items: list[RetrievalChunkOut]
+
+
+class AiPoolStatusOut(BaseModel):
+    checked_out: int
+    size: int
+    overflow: int
+    saturated: bool
+
+
+class AiOperationalTelemetryOut(BaseModel):
+    queue_depth: int
+    worker_concurrency_limit: int
+    provider_calls: int
+    average_provider_latency_ms: int
+    provider_timeout_count: int
+    pool: AiPoolStatusOut

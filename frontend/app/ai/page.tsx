@@ -83,6 +83,11 @@ export default async function AiPage({ searchParams }: AiPageProps) {
                 </div>
                 <span className="status">{activeConversation.status}</span>
               </div>
+              {activeConversation.needs_human ? (
+                <p className="muted">
+                  Employee follow-up requested: {activeConversation.handoff_reason}
+                </p>
+              ) : null}
 
               <div className="messages">
                 {activeConversation.messages.length === 0 ? (

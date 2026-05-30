@@ -1,9 +1,10 @@
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
+from sqlalchemy import delete, select
 
 from app.core.repository import BaseRepository
 from app.domains.ai.models import (
     AiProviderCall,
+    AiRateLimitWindow,
     ChatMessage,
     ChatSession,
     KnowledgeBase,
@@ -15,6 +16,32 @@ from app.domains.ai.models import (
 class AiProviderCallRepository(BaseRepository[AiProviderCall]):
     def __init__(self, session: AsyncSession) -> None:
         super().__init__(session, AiProviderCall)
+
+
+class AiRateLimitWindowRepository(BaseRepository[AiRateLimitWindow]):
+    def __init__(self, session: AsyncSession) -> None:
+        super().__init__(session, AiRateLimitWindow)
+
+    async def get_window(
+        self,
+        *,
+        organization_id: str,
+        subject_type: str,
+        subject_id: str,
+        capability: str,
+        window_started_at,
+    ) -> AiRateLimitWindow | None:
+        return await self.session.scalar(
+            select(AiRateLimitWindow)
+            .where(
+                AiRateLimitWindow.organization_id == organization_id,
+                AiRateLimitWindow.subject_type == subject_type,
+                AiRateLimitWindow.subject_id == subject_id,
+                AiRateLimitWindow.capability == capability,
+                AiRateLimitWindow.window_started_at == window_started_at,
+            )
+            .with_for_update()
+        )
 
 
 class KnowledgeBaseRepository(BaseRepository[KnowledgeBase]):
@@ -54,6 +81,14 @@ class KnowledgeChunkRepository(BaseRepository[KnowledgeChunk]):
             .order_by(KnowledgeChunk.chunk_index.asc())
         )
         return list(result.all())
+
+    async def delete_for_document(self, organization_id: str, document_id: str) -> None:
+        await self.session.execute(
+            delete(KnowledgeChunk).where(
+                KnowledgeChunk.organization_id == organization_id,
+                KnowledgeChunk.document_id == document_id,
+            )
+        )
 
 
 class ChatSessionRepository(BaseRepository[ChatSession]):

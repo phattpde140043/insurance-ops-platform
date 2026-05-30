@@ -34,11 +34,23 @@ async def test_dashboard_summary_keeps_cards_and_adds_workflow_metrics() -> None
             return 8
         return await count(model, _organization_id)
 
+    async def projection_dimensions(_organization_id, _metric_key):
+        return {"reported": 2, "closed": 1}
+
+    async def projection_value(_organization_id, metric_key, dimension):
+        return {
+            ("support_activity", "open_conversations"): 8,
+            ("support_activity", "messages"): 6,
+            ("policies", "active"): 3,
+        }.get((metric_key, dimension), 0)
+
     service._count = count
     service._count_by_column = count_by_column
     service._queue_status_counts = queue_status_counts
     service._overdue_work_item_count = overdue_work_item_count
     service._count_matching = count_matching
+    service._projection_dimensions = projection_dimensions
+    service._projection_value = projection_value
 
     summary = await service.get_summary(organization_id="org_demo", role="admin")
 
@@ -50,6 +62,7 @@ async def test_dashboard_summary_keeps_cards_and_adds_workflow_metrics() -> None
         "open_conversations": 8,
         "messages": 6,
     }
+    assert summary["metrics"]["active_policies"] == 3
 
 
 @pytest.mark.asyncio
@@ -71,11 +84,19 @@ async def test_dashboard_summary_handles_empty_tenant_metrics() -> None:
     async def zero_matching(_model, _organization_id, *conditions):
         return 0
 
+    async def zero_projection_dimensions(_organization_id, _metric_key):
+        return {}
+
+    async def zero_projection_value(_organization_id, _metric_key, _dimension):
+        return 0
+
     service._count = zero_count
     service._count_by_column = empty_counts
     service._queue_status_counts = empty_queue
     service._overdue_work_item_count = no_overdue
     service._count_matching = zero_matching
+    service._projection_dimensions = zero_projection_dimensions
+    service._projection_value = zero_projection_value
 
     summary = await service.get_summary(organization_id="org_empty", role="employee")
 
@@ -89,15 +110,13 @@ async def test_dashboard_summary_handles_empty_tenant_metrics() -> None:
 async def test_dashboard_chart_series_is_chart_ready() -> None:
     service = DashboardAggregationService.__new__(DashboardAggregationService)
 
-    async def count_by_column(_model, column, _organization_id):
-        if column.name == "claim_state":
-            return {"triage": 2, "reported": 1}
-        return {}
+    async def projection_dimensions(_organization_id, _metric_key):
+        return {"triage": 2, "reported": 1}
 
     async def queue_status_counts(_organization_id):
         return {"open": 3}
 
-    service._count_by_column = count_by_column
+    service._projection_dimensions = projection_dimensions
     service._queue_status_counts = queue_status_counts
 
     result = await service.get_chart_series(organization_id="org_demo")

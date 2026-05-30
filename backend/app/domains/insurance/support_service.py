@@ -1,3 +1,5 @@
+from datetime import UTC, datetime, timedelta
+
 from fastapi import HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -22,6 +24,8 @@ from app.domains.insurance.schemas import (
     CreateMessageIn,
 )
 from app.domains.platform.audit_service import AuditEventCreate, AuditLogService
+from app.domains.shared.outbox_service import DomainOutboxService
+from app.domains.shared.idempotency_service import IdempotencyService
 
 
 class InsuranceSupportService:
@@ -35,14 +39,30 @@ class InsuranceSupportService:
         self.messages = InsuranceMessageRepository(session)
         self.chatbot = GuardedChatbotService(session)
         self.audit_log = AuditLogService(session)
+        self.outbox = DomainOutboxService(session)
+        self.idempotency = IdempotencyService(session)
 
     async def create_appointment(
         self,
         *,
         organization_id: str,
         actor_user_id: str,
+        idempotency_key: str,
         payload: CreateAppointmentIn,
     ) -> dict:
+        reservation = await self.idempotency.reserve(
+            organization_id=organization_id,
+            actor_user_id=actor_user_id,
+            command_name="insurance.create_appointment",
+            idempotency_key=idempotency_key,
+            fingerprint_payload=payload.model_dump(),
+        )
+        if reservation.replayed and reservation.record.resource_id:
+            existing = await self.appointments.get_for_org(
+                organization_id, reservation.record.resource_id
+            )
+            if existing is not None:
+                return self._serialize_appointment(existing)
         await self._ensure_customer(organization_id, payload.customer_id)
         appointment = InsuranceAppointment(
             id=new_id("appointment"),
@@ -62,6 +82,18 @@ class InsuranceSupportService:
                 resource_id=appointment.id,
             )
         )
+        await self._emit(
+            organization_id=organization_id,
+            event_type="AppointmentRequested",
+            aggregate_type="insurance_appointment",
+            aggregate_id=appointment.id,
+            payload={"customer_id": payload.customer_id},
+        )
+        self.idempotency.complete(
+            reservation,
+            resource_type="insurance_appointment",
+            resource_id=appointment.id,
+        )
         await self.session.commit()
         return self._serialize_appointment(appointment)
 
@@ -70,8 +102,22 @@ class InsuranceSupportService:
         *,
         organization_id: str,
         actor_user_id: str,
+        idempotency_key: str,
         payload: CreateConversationIn,
     ) -> dict:
+        reservation = await self.idempotency.reserve(
+            organization_id=organization_id,
+            actor_user_id=actor_user_id,
+            command_name="insurance.create_conversation",
+            idempotency_key=idempotency_key,
+            fingerprint_payload=payload.model_dump(),
+        )
+        if reservation.replayed and reservation.record.resource_id:
+            existing = await self.conversations.get_for_org(
+                organization_id, reservation.record.resource_id
+            )
+            if existing is not None:
+                return self._serialize_conversation(existing)
         await self._ensure_customer(organization_id, payload.customer_id)
         if payload.claim_id is not None:
             claim = await self.claims.get_for_org(organization_id, payload.claim_id)
@@ -101,6 +147,18 @@ class InsuranceSupportService:
                 resource_id=conversation.id,
             )
         )
+        await self._emit(
+            organization_id=organization_id,
+            event_type="SupportConversationStarted",
+            aggregate_type="insurance_conversation",
+            aggregate_id=conversation.id,
+            payload={"customer_id": payload.customer_id, "claim_id": payload.claim_id},
+        )
+        self.idempotency.complete(
+            reservation,
+            resource_type="insurance_conversation",
+            resource_id=conversation.id,
+        )
         await self.session.commit()
         return self._serialize_conversation(conversation)
 
@@ -111,7 +169,21 @@ class InsuranceSupportService:
         actor_user_id: str,
         role: str,
         claim_id: str,
+        idempotency_key: str,
     ) -> dict:
+        reservation = await self.idempotency.reserve(
+            organization_id=organization_id,
+            actor_user_id=actor_user_id,
+            command_name="insurance.open_claim_conversation",
+            idempotency_key=idempotency_key,
+            fingerprint_payload={"claim_id": claim_id},
+        )
+        if reservation.replayed and reservation.record.resource_id:
+            replayed = await self.conversations.get_for_org(
+                organization_id, reservation.record.resource_id
+            )
+            if replayed is not None:
+                return self._serialize_conversation(replayed)
         claim = await self.claims.get_for_org(organization_id, claim_id)
         if claim is None:
             raise HTTPException(
@@ -129,6 +201,12 @@ class InsuranceSupportService:
         )
         existing = await self.conversations.get_open_for_claim(organization_id, claim_id)
         if existing is not None:
+            self.idempotency.complete(
+                reservation,
+                resource_type="insurance_conversation",
+                resource_id=existing.id,
+            )
+            await self.session.commit()
             return self._serialize_conversation(existing)
         conversation = InsuranceConversation(
             id=new_id("conversation"),
@@ -149,6 +227,18 @@ class InsuranceSupportService:
                 metadata={"claim_id": claim.id},
             )
         )
+        await self._emit(
+            organization_id=organization_id,
+            event_type="SupportConversationStarted",
+            aggregate_type="insurance_conversation",
+            aggregate_id=conversation.id,
+            payload={"customer_id": claim.customer_id, "claim_id": claim.id},
+        )
+        self.idempotency.complete(
+            reservation,
+            resource_type="insurance_conversation",
+            resource_id=conversation.id,
+        )
         await self.session.commit()
         return self._serialize_conversation(conversation)
 
@@ -159,6 +249,7 @@ class InsuranceSupportService:
         actor_user_id: str,
         role: str,
         conversation_id: str,
+        idempotency_key: str,
         payload: CreateMessageIn,
     ) -> dict:
         conversation = await self.conversations.get_for_org(
@@ -170,12 +261,29 @@ class InsuranceSupportService:
             role=role,
             conversation=conversation,
         )
+        reservation = await self.idempotency.reserve(
+            organization_id=organization_id,
+            actor_user_id=actor_user_id,
+            command_name="insurance.send_support_message",
+            idempotency_key=idempotency_key,
+            fingerprint_payload={
+                "conversation_id": conversation_id,
+                "body": payload.body,
+                "use_ai": payload.use_ai,
+            },
+        )
+        if reservation.replayed and reservation.record.resource_id:
+            existing = await self.messages.get_for_org(
+                organization_id, reservation.record.resource_id
+            )
+            if existing is not None:
+                return self._serialize_message(existing)
         message = InsuranceMessage(
             id=new_id("message"),
             organization_id=organization_id,
             conversation_id=conversation_id,
             sender_user_id=actor_user_id,
-            role="user",
+            role="employee" if role in {"admin", "employee"} else "user",
             body=payload.body,
             citations_json={"chunk_ids": []},
         )
@@ -197,6 +305,35 @@ class InsuranceSupportService:
                     citations_json={"chunk_ids": ai_response["citations"]},
                 )
             )
+            handoff_reason = self._handoff_reason(payload.body, ai_response)
+            if handoff_reason is not None:
+                conversation.needs_human = True
+                conversation.handoff_reason = handoff_reason
+                conversation.priority = "high"
+                conversation.due_at = (
+                    datetime.now(UTC) + timedelta(hours=4)
+                ).isoformat()
+        elif role in {"admin", "employee"}:
+            conversation.needs_human = False
+            conversation.handoff_reason = None
+            if role == "employee":
+                conversation.employee_user_id = actor_user_id
+        await self._emit(
+            organization_id=organization_id,
+            event_type="SupportMessageSent",
+            aggregate_type="insurance_conversation",
+            aggregate_id=conversation_id,
+            payload={"message_id": message.id, "body_length": len(payload.body)},
+        )
+        self.idempotency.complete(
+            reservation,
+            resource_type="insurance_message",
+            resource_id=message.id,
+            response_metadata={
+                "conversation_id": conversation_id,
+                "body_length": len(payload.body),
+            },
+        )
         await self.session.commit()
         return self._serialize_message(message)
 
@@ -269,6 +406,7 @@ class InsuranceSupportService:
         role: str,
         conversation_id: str,
         limit: int = 50,
+        offset: int = 0,
     ) -> list[dict]:
         conversation = await self.conversations.get_for_org(
             organization_id, conversation_id
@@ -280,7 +418,10 @@ class InsuranceSupportService:
             conversation=conversation,
         )
         messages = await self.messages.list_for_conversation(
-            organization_id, conversation_id, limit=self._bounded_limit(limit)
+            organization_id,
+            conversation_id,
+            limit=self._bounded_limit(limit),
+            offset=max(offset, 0),
         )
         return [self._serialize_message(message) for message in messages]
 
@@ -366,7 +507,40 @@ class InsuranceSupportService:
         )
 
     def _bounded_limit(self, limit: int) -> int:
-        return min(max(limit, 1), 100)
+        return min(max(limit, 1), 101)
+
+    def _handoff_reason(self, message: str, ai_response: dict) -> str | None:
+        normalized = message.lower()
+        if any(
+            phrase in normalized
+            for phrase in ("human", "employee", "agent", "representative", "call me")
+        ):
+            return "customer_requested_human"
+        if not ai_response["citations"]:
+            return "ai_no_source"
+        if ai_response["confidence"] < 0.5:
+            return "low_confidence"
+        return None
+
+    async def _emit(
+        self,
+        *,
+        organization_id: str,
+        event_type: str,
+        aggregate_type: str,
+        aggregate_id: str,
+        payload: dict,
+    ) -> None:
+        outbox = getattr(self, "outbox", None)
+        if outbox is not None:
+            await outbox.append(
+                organization_id=organization_id,
+                event_type=event_type,
+                aggregate_type=aggregate_type,
+                aggregate_id=aggregate_id,
+                producer_module="insurance",
+                payload=payload,
+            )
 
     def _serialize_appointment(self, appointment: InsuranceAppointment) -> dict:
         return {
@@ -389,6 +563,8 @@ class InsuranceSupportService:
             "claim_id": getattr(conversation, "claim_id", None),
             "employee_user_id": conversation.employee_user_id,
             "status": conversation.status,
+            "needs_human": getattr(conversation, "needs_human", False),
+            "handoff_reason": getattr(conversation, "handoff_reason", None),
             "created_at": conversation.created_at.isoformat()
             if conversation.created_at
             else "",

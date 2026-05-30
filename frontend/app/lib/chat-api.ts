@@ -1,13 +1,9 @@
-import { apiGet, apiPost } from "./api-client";
+import { apiGet, apiPost, type PaginatedResponse } from "./api-client";
 
 const employeeDemoContext = {
   organizationId: "org_demo",
   userId: "user_employee",
   role: "employee"
-};
-
-type ListResponse<T> = {
-  items: T[];
 };
 
 export type SupportConversation = {
@@ -16,6 +12,8 @@ export type SupportConversation = {
   customer_id: string;
   employee_user_id: string | null;
   status: string;
+  needs_human: boolean;
+  handoff_reason: string | null;
   created_at: string;
 };
 
@@ -35,7 +33,7 @@ export type SupportConversationDetail = SupportConversation & {
 };
 
 export async function getSupportConversations(): Promise<SupportConversation[]> {
-  const response = await apiGet<ListResponse<SupportConversation>>(
+  const response = await apiGet<PaginatedResponse<SupportConversation>>(
     "/insurance/conversations",
     employeeDemoContext
   );

@@ -23,6 +23,8 @@ from app.domains.insurance.schemas import (
 )
 from app.core.model_mixins import new_id
 from app.domains.platform.audit_service import AuditEventCreate, AuditLogService
+from app.domains.shared.outbox_service import DomainOutboxService
+from app.domains.shared.idempotency_service import IdempotencyService
 
 
 class CustomerPortalService:
@@ -35,6 +37,8 @@ class CustomerPortalService:
         self.appointments = InsuranceAppointmentRepository(session)
         self.conversations = InsuranceConversationRepository(session)
         self.audit_log = AuditLogService(session)
+        self.outbox = DomainOutboxService(session)
+        self.idempotency = IdempotencyService(session)
 
     async def get_summary(self, *, organization_id: str, user_id: str) -> dict:
         customer = await self._get_linked_customer(
@@ -117,9 +121,23 @@ class CustomerPortalService:
         *,
         organization_id: str,
         user_id: str,
+        idempotency_key: str,
         payload: CreatePortalAppointmentIn,
     ) -> dict:
         customer = await self._get_linked_customer(organization_id, user_id)
+        reservation = await self.idempotency.reserve(
+            organization_id=organization_id,
+            actor_user_id=user_id,
+            command_name="insurance.portal.request_appointment",
+            idempotency_key=idempotency_key,
+            fingerprint_payload=payload.model_dump(),
+        )
+        if reservation.replayed and reservation.record.resource_id:
+            existing = await self.appointments.get_for_org(
+                organization_id, reservation.record.resource_id
+            )
+            if existing is not None:
+                return self._serialize_appointment(existing)
         assignment = await self._get_active_assignment(organization_id, customer.id)
         appointment = InsuranceAppointment(
             id=new_id("appointment"),
@@ -140,6 +158,18 @@ class CustomerPortalService:
                 metadata={"customer_id": customer.id},
             )
         )
+        await self._emit(
+            organization_id=organization_id,
+            event_type="AppointmentRequested",
+            aggregate_type="insurance_appointment",
+            aggregate_id=appointment.id,
+            payload={"customer_id": customer.id},
+        )
+        self.idempotency.complete(
+            reservation,
+            resource_type="insurance_appointment",
+            resource_id=appointment.id,
+        )
         await self.session.commit()
         return self._serialize_appointment(appointment)
 
@@ -148,9 +178,23 @@ class CustomerPortalService:
         *,
         organization_id: str,
         user_id: str,
+        idempotency_key: str,
         payload: CreatePortalConversationIn,
     ) -> dict:
         customer = await self._get_linked_customer(organization_id, user_id)
+        reservation = await self.idempotency.reserve(
+            organization_id=organization_id,
+            actor_user_id=user_id,
+            command_name="insurance.portal.start_conversation",
+            idempotency_key=idempotency_key,
+            fingerprint_payload=payload.model_dump(),
+        )
+        if reservation.replayed and reservation.record.resource_id:
+            existing = await self.conversations.get_for_org(
+                organization_id, reservation.record.resource_id
+            )
+            if existing is not None:
+                return self._serialize_conversation(existing)
         assignment = await self.assignments.get_active_for_customer(
             organization_id, customer.id
         )
@@ -172,6 +216,18 @@ class CustomerPortalService:
                 metadata={"customer_id": customer.id},
             )
         )
+        await self._emit(
+            organization_id=organization_id,
+            event_type="SupportConversationStarted",
+            aggregate_type="insurance_conversation",
+            aggregate_id=conversation.id,
+            payload={"customer_id": customer.id},
+        )
+        self.idempotency.complete(
+            reservation,
+            resource_type="insurance_conversation",
+            resource_id=conversation.id,
+        )
         await self.session.commit()
         return self._serialize_conversation(conversation)
 
@@ -192,7 +248,27 @@ class CustomerPortalService:
         return customer
 
     def _bounded_limit(self, limit: int) -> int:
-        return min(max(limit, 1), 100)
+        return min(max(limit, 1), 101)
+
+    async def _emit(
+        self,
+        *,
+        organization_id: str,
+        event_type: str,
+        aggregate_type: str,
+        aggregate_id: str,
+        payload: dict,
+    ) -> None:
+        outbox = getattr(self, "outbox", None)
+        if outbox is not None:
+            await outbox.append(
+                organization_id=organization_id,
+                event_type=event_type,
+                aggregate_type=aggregate_type,
+                aggregate_id=aggregate_id,
+                producer_module="insurance",
+                payload=payload,
+            )
 
     async def _get_active_assignment(
         self, organization_id: str, customer_id: str
@@ -269,6 +345,8 @@ class CustomerPortalService:
             "customer_id": conversation.customer_id,
             "employee_user_id": conversation.employee_user_id,
             "status": conversation.status,
+            "needs_human": getattr(conversation, "needs_human", False),
+            "handoff_reason": getattr(conversation, "handoff_reason", None),
             "created_at": conversation.created_at.isoformat()
             if conversation.created_at
             else "",

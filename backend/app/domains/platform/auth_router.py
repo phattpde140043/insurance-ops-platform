@@ -17,6 +17,9 @@ from app.domains.platform.auth_schemas import (
 from app.domains.platform.google_sso import (
     GoogleTokenVerifier,
     get_google_token_verifier,
+    issue_google_callback_state,
+    validate_google_sso_configuration,
+    verify_google_callback_state,
 )
 
 router = APIRouter(prefix="/auth", tags=["auth"])
@@ -24,11 +27,14 @@ router = APIRouter(prefix="/auth", tags=["auth"])
 
 @router.get("/google/login", response_model=GoogleLoginOut)
 async def get_google_login_metadata() -> GoogleLoginOut:
+    validate_google_sso_configuration()
     return GoogleLoginOut(
         provider="google",
         client_id=settings.google_client_id,
+        callback_url=settings.google_callback_url,
         scope=settings.google_oauth_scope,
         response_type="id_token",
+        state=issue_google_callback_state(),
         next_step="Send the Google ID token to POST /api/v1/auth/google/callback.",
     )
 
@@ -39,6 +45,7 @@ async def handle_google_callback(
     verifier: Annotated[GoogleTokenVerifier, Depends(get_google_token_verifier)],
     session: Annotated[AsyncSession, Depends(get_db_session)],
 ) -> GoogleCallbackOut:
+    verify_google_callback_state(payload.state)
     profile = await verifier.verify_id_token(payload.id_token)
     principal = await AuthMembershipService(session).principal_from_google_profile(profile)
     token_payload = issue_access_token(principal)

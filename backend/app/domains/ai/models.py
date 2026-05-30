@@ -1,4 +1,6 @@
-from sqlalchemy import ForeignKey, Integer, JSON, String, Text
+from datetime import datetime
+
+from sqlalchemy import DateTime, ForeignKey, Integer, JSON, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.core.database import Base
@@ -15,6 +17,28 @@ class AiProviderCall(IdMixin, TenantMixin, TimestampMixin, Base):
     cost_units: Mapped[int | None] = mapped_column(Integer)
     request_metadata: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
     error_message: Mapped[str | None] = mapped_column(Text)
+
+
+class AiRateLimitWindow(IdMixin, TenantMixin, TimestampMixin, Base):
+    __tablename__ = "ai_rate_limit_windows"
+    __table_args__ = (
+        UniqueConstraint(
+            "organization_id",
+            "subject_type",
+            "subject_id",
+            "capability",
+            "window_started_at",
+            name="uq_ai_rate_limit_window",
+        ),
+    )
+
+    subject_type: Mapped[str] = mapped_column(String(40), index=True, nullable=False)
+    subject_id: Mapped[str] = mapped_column(String(64), index=True, nullable=False)
+    capability: Mapped[str] = mapped_column(String(80), index=True, nullable=False)
+    window_started_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), index=True, nullable=False
+    )
+    request_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
 
 
 class KnowledgeBase(IdMixin, TenantMixin, TimestampMixin, Base):
@@ -60,4 +84,3 @@ class ChatMessage(IdMixin, TenantMixin, TimestampMixin, Base):
     role: Mapped[str] = mapped_column(String(40), nullable=False)
     body: Mapped[str] = mapped_column(Text, nullable=False)
     citations: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
-

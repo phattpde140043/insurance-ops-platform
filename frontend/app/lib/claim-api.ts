@@ -1,13 +1,9 @@
-import { apiGet, apiPost } from "./api-client";
+import { apiGet, apiPost, type PaginatedResponse } from "./api-client";
 
 const employeeDemoContext = {
   organizationId: "org_demo",
   userId: "user_employee",
   role: "employee"
-};
-
-type ListResponse<T> = {
-  items: T[];
 };
 
 export type ClaimDetail = {
@@ -40,6 +36,18 @@ export type ClaimConversation = {
   status: string;
 };
 
+export type ClaimCorrection = {
+  id: string;
+  claim_id: string;
+  reviewer_user_id: string;
+  status: string;
+  corrected_fields: Record<string, string | null>;
+  changed_fields: string[];
+  approved_by_user_id: string | null;
+  approved_at: string | null;
+  created_at: string;
+};
+
 export async function getClaimDetail(claimId: string): Promise<ClaimDetail> {
   return apiGet<ClaimDetail>(
     `/insurance/claims/${encodeURIComponent(claimId)}`,
@@ -48,7 +56,7 @@ export async function getClaimDetail(claimId: string): Promise<ClaimDetail> {
 }
 
 export async function getClaimHistory(claimId: string): Promise<ClaimTransition[]> {
-  const response = await apiGet<ListResponse<ClaimTransition>>(
+  const response = await apiGet<PaginatedResponse<ClaimTransition>>(
     `/insurance/claims/${encodeURIComponent(claimId)}/history`,
     employeeDemoContext
   );
@@ -75,6 +83,38 @@ export async function openClaimConversation(
 ): Promise<ClaimConversation> {
   return apiPost<ClaimConversation>(
     `/insurance/claims/${encodeURIComponent(claimId)}/conversation`,
+    {},
+    employeeDemoContext
+  );
+}
+
+export async function getClaimCorrections(
+  claimId: string
+): Promise<ClaimCorrection[]> {
+  const response = await apiGet<PaginatedResponse<ClaimCorrection>>(
+    `/insurance/claims/${encodeURIComponent(claimId)}/corrections`,
+    employeeDemoContext
+  );
+  return response.items;
+}
+
+export async function saveClaimCorrection(
+  claimId: string,
+  correctedFields: Record<string, string | null>
+): Promise<ClaimCorrection> {
+  return apiPost<ClaimCorrection>(
+    `/insurance/claims/${encodeURIComponent(claimId)}/corrections`,
+    { corrected_fields: correctedFields },
+    employeeDemoContext
+  );
+}
+
+export async function approveClaimCorrection(
+  claimId: string,
+  correctionId: string
+): Promise<ClaimCorrection> {
+  return apiPost<ClaimCorrection>(
+    `/insurance/claims/${encodeURIComponent(claimId)}/corrections/${encodeURIComponent(correctionId)}/approve`,
     {},
     employeeDemoContext
   );
