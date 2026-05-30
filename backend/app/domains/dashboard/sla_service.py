@@ -5,12 +5,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.model_mixins import new_id
 from app.domains.dashboard.models import SlaAlert, SlaRule
-from app.domains.insurance.models import (
-    InsuranceAppointment,
-    InsuranceConversation,
-    InsuranceEmployeeAssignment,
-    InsuranceIncidentReport,
-)
+from app.domains.dashboard.models import DashboardSlaTargetProjection
+from app.domains.shared.outbox_service import DomainOutboxService
 
 
 class SlaStatusService:
@@ -34,6 +30,7 @@ class SlaEvaluationService:
     def __init__(self, session: AsyncSession) -> None:
         self.session = session
         self.status = SlaStatusService()
+        self.outbox = DomainOutboxService(session)
 
     async def run_for_organization(
         self, *, organization_id: str, now: datetime | None = None
@@ -80,9 +77,11 @@ class SlaEvaluationService:
         return list(result.all())
 
     async def _workflow_items(self, organization_id: str, target_type: str) -> list:
-        model = self._target_model(target_type)
         result = await self.session.scalars(
-            select(model).where(model.organization_id == organization_id)
+            select(DashboardSlaTargetProjection).where(
+                DashboardSlaTargetProjection.organization_id == organization_id,
+                DashboardSlaTargetProjection.target_type == target_type,
+            )
         )
         return list(result.all())
 
@@ -101,33 +100,58 @@ class SlaEvaluationService:
     async def _add_alert(
         self, *, organization_id: str, rule: SlaRule, item, now: datetime
     ) -> None:
-        self.session.add(
-            SlaAlert(
-                id=new_id("sla_alert"),
-                organization_id=organization_id,
-                rule_id=rule.id,
-                target_type=rule.target_type,
-                target_id=item.id,
-                severity=rule.severity,
-                status="active",
-                breached_at=now,
-            )
+        alert = SlaAlert(
+            id=new_id("sla_alert"),
+            organization_id=organization_id,
+            rule_id=rule.id,
+            target_type=rule.target_type,
+            target_id=item.id,
+            severity=rule.severity,
+            status="active",
+            breached_at=now,
+        )
+        self.session.add(alert)
+        await self._emit(
+            organization_id=organization_id,
+            event_type="SlaAlertRaised",
+            aggregate_id=alert.id,
+            payload={
+                "target_type": rule.target_type,
+                "target_id": item.id,
+                "severity": rule.severity,
+            },
         )
 
     async def _resolve_alert(self, alert: SlaAlert, *, now: datetime) -> None:
         alert.status = "resolved"
         alert.resolved_at = now
+        await self._emit(
+            organization_id=alert.organization_id,
+            event_type="SlaAlertResolved",
+            aggregate_id=alert.id,
+            payload={
+                "target_type": alert.target_type,
+                "target_id": alert.target_id,
+            },
+        )
+
+    async def _emit(
+        self,
+        *,
+        organization_id: str,
+        event_type: str,
+        aggregate_id: str,
+        payload: dict,
+    ) -> None:
+        if self.session is not None:
+            await self.outbox.append(
+                organization_id=organization_id,
+                event_type=event_type,
+                aggregate_type="sla_alert",
+                aggregate_id=aggregate_id,
+                producer_module="dashboard",
+                payload=payload,
+            )
 
     async def _commit(self) -> None:
         await self.session.commit()
-
-    def _target_model(self, target_type: str):
-        models = {
-            "assignment": InsuranceEmployeeAssignment,
-            "appointment": InsuranceAppointment,
-            "claim": InsuranceIncidentReport,
-            "conversation": InsuranceConversation,
-        }
-        if target_type not in models:
-            raise ValueError(f"Unsupported SLA target type: {target_type}")
-        return models[target_type]

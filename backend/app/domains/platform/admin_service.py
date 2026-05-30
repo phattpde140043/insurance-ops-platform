@@ -18,13 +18,17 @@ class AdminUserService:
         self.audit_log = AuditLogService(session)
         self.audit_events = AuditEventRepository(session)
 
-    async def list_users(self, organization_id: str) -> list[dict]:
+    async def list_users(
+        self, organization_id: str, *, limit: int = 50, offset: int = 0
+    ) -> list[dict]:
         statement = (
             select(User, Membership, Role)
             .join(Membership, Membership.user_id == User.id)
             .join(Role, Role.id == Membership.role_id)
             .where(Membership.organization_id == organization_id)
             .order_by(User.created_at.desc())
+            .limit(limit)
+            .offset(offset)
         )
         rows = await self.session.execute(statement)
         return [
@@ -114,8 +118,12 @@ class AdminUserService:
         )
         await self.session.commit()
 
-    async def list_audit_events(self, organization_id: str) -> list[dict]:
-        events = await self.audit_events.list_recent_for_org(organization_id)
+    async def list_audit_events(
+        self, organization_id: str, *, limit: int = 50, offset: int = 0
+    ) -> list[dict]:
+        events = await self.audit_events.list_recent_for_org(
+            organization_id, limit=limit, offset=offset
+        )
         return [self._serialize_audit_event(event) for event in events]
 
     def _serialize_audit_event(self, event: AuditEvent) -> dict:

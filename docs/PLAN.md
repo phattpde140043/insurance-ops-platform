@@ -11,19 +11,25 @@
 - Guarded chatbot answer flow.
 - NextJS app shell with insurance incident form.
 - Docker, CI baseline and backend tests.
+- Customer self-service portal APIs and `/portal` frontend.
+- Employee/admin workload queue APIs and `/insurance` queue workspace.
+- Claim lifecycle state machine, transition history and `/insurance/claims/[id]` frontend.
+- Persisted support conversations with AI-assisted replies and `/ai` thread UI.
+- Dashboard charts, SLA alert persistence, SLA evaluation and `/dashboard` frontend.
+- Architecture ADR set for modular monolith, production auth, pagination/rate limits, claims, chat, dashboard/SLA and background jobs.
 
 ## Architecture vs Current Master Plan
 
-The documented architecture is modular and already separates platform identity, shared infrastructure, insurance workflows, AI retrieval and dashboard aggregation. The current master plan correctly names the next product-depth areas, but it is too coarse for sequential agent execution and does not yet encode dependencies, test boundaries, tenancy enforcement or acceptance criteria.
+The approved architecture is modular and already separates platform identity, shared infrastructure, insurance workflows, AI retrieval and dashboard aggregation. The current master plan is now the execution backlog for the remaining production-readiness work, not the original feature-depth backlog. It must keep dependencies explicit so agents can run one task at a time without inventing cross-module coupling.
 
 Key alignment notes:
 
-- `platform` is the foundation for all remaining work because every feature must resolve tenant, user and role from the authenticated request context.
-- `insurance` is the primary dependency for customer self-service, employee queues and claim lifecycle work.
-- `shared` should be used for files and background jobs before adding claim evidence uploads, queue workers or SLA notifications.
-- `ai` is already service-isolated; the next chat UI should consume persisted conversations and guarded answers without coupling AI logic into insurance services.
-- `dashboard` should remain an aggregation boundary and should not own workflow state.
-- The frontend currently exposes the app shell and initial pages, so most remaining work needs API contracts plus user-facing screens, not only backend endpoints.
+- `platform` remains the foundation because production auth, tenant resolution, SSO and audit behavior must be fail-closed before external traffic.
+- `shared` owns file and job infrastructure; durable worker claiming and object storage must come before heavier export or ingestion workflows.
+- `insurance` owns customer self-service, queues, claims, reviewer corrections, appointments and support workflow state.
+- `ai` is service-isolated and must gain enforceable budgets, async ingestion and evaluation guardrails without mutating insurance state directly.
+- `dashboard` should remain a read-only aggregation/read-model boundary and must not own workflow state.
+- The frontend now has primary portal, insurance, claim, AI and dashboard surfaces; remaining UI tasks should complete production workflows and error states rather than rebuild placeholders.
 
 Planning assumptions:
 
@@ -39,6 +45,8 @@ Planning gate:
 
 ## Planning and Review Hardening Addendum
 
+Historical note: these findings drove the completed `T00.*` hardening work and remain as guardrails for future agents.
+
 This addendum was produced by reviewing the plan through the implementation-planning, code-review, security-checklist, API-design, Postgres-performance and resilience-pattern lenses. The verdict is: request changes to execution order before feature work continues, because several security and performance foundations must become upstream dependencies rather than late follow-up tasks.
 
 Review findings:
@@ -52,6 +60,8 @@ Review findings:
 - Important: AI chat must enforce tenant-scoped retrieval, safe citation references, prompt/data minimization and response-size bounds before persisted support chat becomes a customer feature.
 
 ## Architect Review Addendum
+
+Historical note: these findings drove the approved ADRs, module dependency contract and production architecture. They remain here so new tasks preserve the decisions rather than reopening them casually.
 
 This addendum was produced by reviewing the plan through the backend-architect, system-architecture, architecture-design and clean-architecture lenses. The verdict is: continue with the modular monolith, but make architecture decisions explicit before expanding feature depth.
 
@@ -190,53 +200,55 @@ Required for frontend feature tasks:
 
 ## Current Implementation Status
 
-This matrix records the current source-state before product-depth work continues.
+This matrix records the current source-state after the approved architecture review and before production-readiness work continues.
 
 | Area | Status | Evidence | Next action |
 | --- | --- | --- | --- |
-| Platform auth and tenant context | Partial, hardened foundation added | `backend/app/core/context.py`, `backend/app/core/session.py`, `backend/app/tests/test_auth_context.py` | Keep production-like auth tests green while adding feature endpoints. |
-| API pagination/rate-limit contracts | Documented, not fully implemented | `docs/PLAN.md`, `docs/ARCHITECTURE.md`, existing `backend/app/domains/shared/schemas.py` still supports simple list responses | Extend list response metadata when touching endpoints. |
-| Tenant isolation test harness | Exists for service-level checks | `backend/app/tests/support/tenant_isolation.py`, `backend/app/tests/test_insurance_tenant_scope.py` | Reuse helpers for every new endpoint/service. |
-| Architecture docs and ADRs | Exists | `docs/ARCHITECTURE.md`, `docs/adr/*.md` | Keep ADR links current as decisions change. |
-| Customer self-service portal | Missing product feature; backend primitives partial | `InsuranceCustomer.linked_user_id` in `backend/app/domains/insurance/models.py`; no portal route/page | Start with `T02.1` portal summary API after API/route inventory. |
-| Employee workload queues | Partial skeleton | assignments model/service/router exist; no queue list/detail/action endpoints | Add queue fields and queue APIs in `T03.*`. |
-| Claim lifecycle state machine | Missing | incidents have string `status`; no transition history/state machine | Implement `T04.*` after queue foundation. |
-| Persisted support chat | Partial split skeleton | insurance conversations/messages create endpoints exist; AI chat sessions/messages exist separately | Add conversation list/detail and AI orchestration in `T05.*`. |
-| Dashboard charts and SLA alerts | Basic summary only | `backend/app/domains/dashboard/service.py` counts customers/policies/incidents/audit; frontend dashboard uses demo data | Add metric contracts/read models/SLA in `T06.*`. |
-| Frontend portal/queue/claim/chat/dashboard UX | Partial shell | `frontend/app/insurance/page.tsx`, `frontend/app/ai/page.tsx`, `frontend/app/dashboard/page.tsx` | Replace placeholders and demo fallbacks during feature tasks. |
-| Background worker | Infrastructure exists | `backend/app/workers/background_worker.py`, `backend/app/domains/shared/job_service.py` | Assign domain-owned handlers for PDF/SLA/AI jobs. |
+| Platform auth and tenant context | Implemented foundation, production hardening remains | `backend/app/core/context.py`, `backend/app/core/session.py`, `backend/app/tests/test_auth_context.py` | Gate demo headers strictly in production-like config and add fail-closed Google SSO behavior in `T08.1` and `T08.2`. |
+| API pagination/rate-limit contracts | Documented; compatibility list envelope remains | `docs/PLAN.md`, `docs/ARCHITECTURE.md`, `backend/app/domains/shared/schemas.py` | Add `meta` pagination envelope for touched list endpoints and complete full migration in `T08.3`. |
+| Tenant isolation test harness | Exists | `backend/app/tests/support/tenant_isolation.py`, `backend/app/tests/test_insurance_tenant_scope.py` | Reuse helpers for every new endpoint/service and production-readiness task. |
+| Architecture docs and ADRs | Approved | `docs/ARCHITECTURE.md`, `docs/adr/*.md` | Keep this plan aligned with approved architecture; add ADRs only for changed decisions. |
+| Customer self-service portal | Implemented | `backend/app/domains/insurance/portal_service.py`, `frontend/app/portal/page.tsx`, `frontend/app/portal/portal-actions.tsx` | Keep portal behavior covered while adding production auth, storage, export and idempotency hardening. |
+| Employee workload queues | Implemented | `backend/app/domains/insurance/queue_service.py`, `backend/alembic/versions/0002_queue_fields.py`, `frontend/app/insurance/page.tsx` | Preserve queue ownership; use queue data for reviewer correction and SLA follow-up tasks. |
+| Claim lifecycle state machine | Implemented | `backend/app/domains/insurance/claim_lifecycle_service.py`, `backend/alembic/versions/0003_claim_lifecycle.py`, `frontend/app/insurance/claims/[id]/page.tsx` | Add reviewer correction workflow and export artifacts without bypassing state-machine rules. |
+| Persisted support chat | Implemented | `backend/app/domains/insurance/support_service.py`, `backend/alembic/versions/0004_insurance_message_ai_fields.py`, `backend/alembic/versions/0005_conversation_claim_link.py`, `frontend/app/ai/page.tsx` | Complete AI budget, handoff, semantic guardrail and idempotency hardening tasks. |
+| Dashboard charts and SLA alerts | Implemented | `backend/app/domains/dashboard/service.py`, `backend/app/domains/dashboard/sla_service.py`, `backend/alembic/versions/0006_sla_persistence.py`, `frontend/app/dashboard/page.tsx` | Move selected metrics to event-fed read models after outbox support exists. |
+| Frontend portal/queue/claim/chat/dashboard UX | Implemented feature surfaces | `frontend/app/portal/page.tsx`, `frontend/app/insurance/page.tsx`, `frontend/app/insurance/claims/[id]/page.tsx`, `frontend/app/ai/page.tsx`, `frontend/app/dashboard/page.tsx` | Add backend-unavailable states, fetch timeout/retry behavior and production auth flow support in later tasks. |
+| Background worker | Partial production readiness | `backend/app/workers/background_worker.py`, `backend/app/domains/shared/job_service.py` | Add durable claiming for SLA and knowledge ingestion jobs before relying on async workloads. |
+| File storage and export artifacts | Local/storage primitives only | `backend/app/core/storage.py`, `backend/app/domains/shared/file_service.py` | Add private object storage and expiring export downloads before production-style document delivery. |
+| Domain event delivery | Documented target, not implemented | `docs/ARCHITECTURE.md` Domain Event Delivery Model | Add transactional outbox after worker claiming and before event-fed dashboard read models. |
 
-## Planned API Contracts
+## Approved API Contracts
 
-All contracts are additive unless explicitly marked otherwise. Every implementation must use DTOs, tenant-scoped services, bounded collection responses and the listed rate-limit tier.
+These contracts are the approved API surface from the architecture. Implemented contracts must still follow DTO-only responses, tenant-scoped services, bounded collection responses and the listed rate-limit tier. Pending production-readiness work focuses on pagination metadata, idempotency, durable workers, exports and AI budgets rather than renaming these routes.
 
 | Contract | Method/path | Owner | Roles | Tier | Status | ADR |
 | --- | --- | --- | --- | --- | --- | --- |
-| Portal summary | `GET /api/v1/insurance/portal/summary` | `insurance` | `customer`, optional `admin` support view | `read-list` | New | ADR 0002, ADR 0003 |
-| Portal policies | `GET /api/v1/insurance/portal/policies` | `insurance` | `customer` | `read-list` | New | ADR 0003 |
-| Portal incidents/claims | `GET /api/v1/insurance/portal/incidents` | `insurance` | `customer` | `read-list` | New | ADR 0003, ADR 0004 |
-| Portal appointments | `GET /api/v1/insurance/portal/appointments` | `insurance` | `customer` | `read-list` | New | ADR 0003 |
-| Portal conversations | `GET /api/v1/insurance/portal/conversations` | `insurance` | `customer` | `read-list` | New | ADR 0003, ADR 0005 |
-| Portal appointment request | `POST /api/v1/insurance/portal/appointments` | `insurance` | `customer` | `write-command` | New | ADR 0002 |
-| Portal conversation start | `POST /api/v1/insurance/portal/conversations` | `insurance` | `customer` | `write-command` | New | ADR 0005 |
-| Employee my queue | `GET /api/v1/insurance/queues/my` | `insurance` | `employee` | `read-list` | New | ADR 0003 |
-| Admin queue | `GET /api/v1/insurance/queues` | `insurance` | `admin` | `read-list` | New | ADR 0003 |
-| Queue detail | `GET /api/v1/insurance/queues/{item_id}` | `insurance` | `admin`, `employee` | `read-list` | New | ADR 0003 |
-| Queue assign/reassign | `POST /api/v1/insurance/queues/{item_id}/assign` | `insurance` | `admin` | `write-command` | New | ADR 0004 |
-| Queue status/priority action | `POST /api/v1/insurance/queues/{item_id}/actions` | `insurance` | `admin`, `employee` with object permission | `write-command` | New | ADR 0004 |
-| Claim detail | `GET /api/v1/insurance/claims/{claim_id}` | `insurance` | `admin`, `employee`, owner `customer` | `read-list` | New or incident extension | ADR 0004 |
-| Claim history | `GET /api/v1/insurance/claims/{claim_id}/history` | `insurance` | `admin`, `employee`, owner `customer` with redaction | `read-list` | New | ADR 0004 |
-| Claim transition | `POST /api/v1/insurance/claims/{claim_id}/transitions` | `insurance` | `admin`, `employee` | `write-command` | New | ADR 0004 |
-| Conversation list | `GET /api/v1/insurance/conversations` | `insurance` | `admin`, `employee`, `customer` scoped | `read-list` | Extends existing conversation create surface | ADR 0005 |
-| Conversation detail/messages | `GET /api/v1/insurance/conversations/{conversation_id}` | `insurance` | scoped participant/admin | `read-list` | New | ADR 0005 |
-| Send support message | `POST /api/v1/insurance/conversations/{conversation_id}/messages` | `insurance` | scoped participant/admin | `write-command` | Existing, must add idempotency | ADR 0005 |
-| Send AI-assisted support message | `POST /api/v1/insurance/conversations/{conversation_id}/ai-messages` | `insurance` orchestrating `ai` | scoped participant/admin | `ai-expensive` | New | ADR 0005 |
-| Dashboard summary | `GET /api/v1/dashboard/summary` | `dashboard` | `admin`, `employee`, `customer` scoped | `read-list` | Existing, extend additively | ADR 0006 |
-| Dashboard chart series | `GET /api/v1/dashboard/charts` | `dashboard` | role scoped | `read-list` | New | ADR 0006 |
-| SLA alerts | `GET /api/v1/dashboard/sla-alerts` | `dashboard` | role scoped | `read-list` | New | ADR 0006 |
-| SLA alert detail | `GET /api/v1/dashboard/sla-alerts/{alert_id}` | `dashboard` | role scoped | `read-list` | New | ADR 0006 |
-| Trigger knowledge ingestion | `POST /api/v1/ai/knowledge-documents/{document_id}/ingest` | `ai` and `shared` job infra | `admin` | `ai-expensive` | Existing, must align job contract | ADR 0007 |
-| Guarded AI chat | `POST /api/v1/ai/chat` | `ai` | `admin`, `employee`, `customer` scoped | `ai-expensive` | Existing, must align prompt/citation guardrails | ADR 0005 |
+| Portal summary | `GET /api/v1/insurance/portal/summary` | `insurance` | `customer`, optional `admin` support view | `read-list` | Implemented | ADR 0002, ADR 0003 |
+| Portal policies | `GET /api/v1/insurance/portal/policies` | `insurance` | `customer` | `read-list` | Implemented; needs `meta` migration | ADR 0003 |
+| Portal incidents/claims | `GET /api/v1/insurance/portal/incidents` | `insurance` | `customer` | `read-list` | Implemented; needs `meta` migration | ADR 0003, ADR 0004 |
+| Portal appointments | `GET /api/v1/insurance/portal/appointments` | `insurance` | `customer` | `read-list` | Implemented; needs `meta` migration | ADR 0003 |
+| Portal conversations | `GET /api/v1/insurance/portal/conversations` | `insurance` | `customer` | `read-list` | Implemented; needs `meta` migration | ADR 0003, ADR 0005 |
+| Portal appointment request | `POST /api/v1/insurance/portal/appointments` | `insurance` | `customer` | `write-command` | Implemented; needs idempotency hardening | ADR 0002 |
+| Portal conversation start | `POST /api/v1/insurance/portal/conversations` | `insurance` | `customer` | `write-command` | Implemented; needs idempotency hardening | ADR 0005 |
+| Employee my queue | `GET /api/v1/insurance/queues/my` | `insurance` | `employee` | `read-list` | Implemented; needs `meta` migration | ADR 0003 |
+| Admin queue | `GET /api/v1/insurance/queues` | `insurance` | `admin` | `read-list` | Implemented; needs `meta` migration | ADR 0003 |
+| Queue detail | `GET /api/v1/insurance/queues/{item_id}` | `insurance` | `admin`, `employee` | `read-list` | Implemented | ADR 0003 |
+| Queue assign/reassign | `POST /api/v1/insurance/queues/{item_id}/assign` | `insurance` | `admin` | `write-command` | Planned hardening; current action endpoint covers status/priority | ADR 0004 |
+| Queue status/priority action | `POST /api/v1/insurance/queues/{item_id}/actions` | `insurance` | `admin`, `employee` with object permission | `write-command` | Implemented; needs idempotency hardening | ADR 0004 |
+| Claim detail | `GET /api/v1/insurance/claims/{claim_id}` | `insurance` | `admin`, `employee`, owner `customer` | `read-list` | Implemented | ADR 0004 |
+| Claim history | `GET /api/v1/insurance/claims/{claim_id}/history` | `insurance` | `admin`, `employee`, owner `customer` with redaction | `read-list` | Implemented; needs `meta` migration | ADR 0004 |
+| Claim transition | `POST /api/v1/insurance/claims/{claim_id}/transitions` | `insurance` | `admin`, `employee` | `write-command` | Implemented; needs idempotency hardening | ADR 0004 |
+| Conversation list | `GET /api/v1/insurance/conversations` | `insurance` | `admin`, `employee`, `customer` scoped | `read-list` | Implemented; needs `meta` migration | ADR 0005 |
+| Conversation detail/messages | `GET /api/v1/insurance/conversations/{conversation_id}` | `insurance` | scoped participant/admin | `read-list` | Implemented; needs message cursor migration | ADR 0005 |
+| Send support message | `POST /api/v1/insurance/conversations/{conversation_id}/messages` | `insurance` | scoped participant/admin | `write-command` | Implemented; needs idempotency hardening | ADR 0005 |
+| Send AI-assisted support message | `POST /api/v1/insurance/conversations/{conversation_id}/ai-messages` | `insurance` orchestrating `ai` | scoped participant/admin | `ai-expensive` | Implemented; needs AI budget and idempotency hardening | ADR 0005 |
+| Dashboard summary | `GET /api/v1/dashboard/summary` | `dashboard` | `admin`, `employee`, `customer` scoped | `read-list` | Implemented | ADR 0006 |
+| Dashboard chart series | `GET /api/v1/dashboard/charts` | `dashboard` | role scoped | `read-list` | Implemented | ADR 0006 |
+| SLA alerts | `GET /api/v1/dashboard/sla-alerts` | `dashboard` | role scoped | `read-list` | Implemented; needs `meta` migration | ADR 0006 |
+| SLA alert detail | `GET /api/v1/dashboard/sla-alerts/{alert_id}` | `dashboard` | role scoped | `read-list` | Implemented | ADR 0006 |
+| Trigger knowledge ingestion | `POST /api/v1/ai/knowledge-documents/{document_id}/ingest` | `ai` and `shared` job infra | `admin` | `ai-expensive` | Implemented MVP; move to durable async worker | ADR 0007 |
+| Guarded AI chat | `POST /api/v1/ai/chat` | `ai` | `admin`, `employee`, `customer` scoped | `ai-expensive` | Implemented MVP; needs AI budget and evaluation guardrails | ADR 0005 |
 
 Request/response shape notes:
 
@@ -246,9 +258,9 @@ Request/response shape notes:
 - Customer portal command payloads must not accept arbitrary `customer_id`.
 - Dashboard APIs are read-only and must not mutate workflow state.
 
-## Planned Frontend Routes
+## Approved Frontend Routes
 
-Frontend routes must use API client functions and must not duplicate backend authorization or workflow rules.
+Frontend routes must use API client functions and must not duplicate backend authorization or workflow rules. The routes below are implemented feature surfaces unless their notes explicitly name a production-readiness follow-up.
 
 | Route | Owner feature | Primary user | Mode | First implementation task | Notes |
 | --- | --- | --- | --- | --- | --- |
@@ -271,6 +283,8 @@ Frontend state requirements:
 - Primary commands use buttons/forms, not placeholder anchors.
 
 ## Sequential Continuation Plan
+
+Tasks 01 through 06 below are the completed product-depth sequence kept as historical context and implementation template. Current agent execution should resume from the pending `T08.*` production-readiness backlog unless a completed feature task is intentionally reopened.
 
 ### Task 01 - Baseline Contract and Gap Audit
 
@@ -1954,15 +1968,211 @@ Document and, where practical, script the platform-level verification flow acros
 - Manual smoke paths include expected successful and forbidden cases.
 - No unrelated refactors are introduced.
 
-### T08.1 - Add Transactional Domain Event Outbox
+### T08.1 - Strictly Gate Demo Header Authentication
 
 **Status**
 
-- Pending.
+- Completed.
 
 **Depends On**
 
 - T07.2.
+
+**JTBD**
+
+As a production operator, I need demo header authentication disabled in production-like environments so tenants, users and roles cannot be spoofed through client-controlled headers.
+
+**Description**
+
+Turn the architecture's local-only demo header rule into a fail-closed runtime guarantee. This task must run before SSO, worker, storage, export or external-facing production tasks because all later authorization relies on trusted actor context.
+
+**Implementation**
+
+- Add or tighten configuration so demo header auth is enabled only for explicit local/demo modes.
+- Add tests for production-like mode rejecting `X-Organization-Id`, `X-User-Id` and `X-Role` without a valid bearer token.
+- Verify all feature routes use the shared request context and cannot bypass production auth.
+- Update backend README or deployment notes to label demo headers as local development only.
+
+**Acceptance Criteria**
+
+- Production-like config returns `401` for header-only auth.
+- Local demo mode still supports seeded demo workflows.
+- Tests cover missing token, malformed token, valid token and header-only spoof attempts.
+- No customer, queue, claim, chat or dashboard route can switch tenant or role through client headers in production-like mode.
+
+### T08.2 - Add Fail-Closed Production Google SSO Mode
+
+**Status**
+
+- Completed.
+
+**Depends On**
+
+- T08.1.
+
+**JTBD**
+
+As an enterprise admin, I need Google SSO to fail closed when production configuration is incomplete or invalid so users cannot silently fall back to unsafe demo identity.
+
+**Description**
+
+Harden the optional Google SSO adapter described in the architecture without coupling insurance workflows to Google-specific logic.
+
+**Implementation**
+
+- Add configuration validation for production SSO mode, including required client id, callback URL and issuer/audience expectations.
+- Ensure missing or invalid SSO configuration returns a safe auth error rather than enabling demo auth.
+- Add tests for valid SSO config, missing client id, invalid callback state and disabled SSO mode.
+- Keep platform auth services as the only owner of Google-specific behavior.
+
+**Acceptance Criteria**
+
+- Production SSO cannot start or authenticate with incomplete required configuration.
+- Demo headers are not used as fallback when SSO fails in production-like mode.
+- Insurance, AI and dashboard modules remain independent of Google adapter internals.
+- Tests cover success, disabled SSO and fail-closed misconfiguration paths.
+
+### T08.3 - Add Pagination Metadata and Cursor Envelopes
+
+**Status**
+
+- Completed.
+
+**Depends On**
+
+- T08.2.
+
+**JTBD**
+
+As a frontend and API consumer, I need every growing collection to return pagination metadata so screens can page predictably and list endpoints cannot become unbounded.
+
+**Description**
+
+Complete the compatibility migration from `{"items": [...]}` list responses to the approved `items + meta` collection envelope for admin, audit, customer portal, queues, conversations, claims and SLA alerts.
+
+**Implementation**
+
+- Extend shared collection schemas with `meta.limit`, `meta.sort`, `meta.next_cursor`, `meta.offset`, `meta.total` and `meta.has_more` where appropriate.
+- Migrate high-volume list endpoints first: audit events, portal histories, queue lists, claim history, conversation messages and SLA alerts.
+- Use cursor pagination for append-only or high-volume histories and offset pagination only for small/admin lists.
+- Update frontend API clients to consume `meta` without breaking existing empty-state rendering.
+- Add tests for max limit, default sort, cursor/offset behavior and backwards-compatible response parsing where required.
+
+**Acceptance Criteria**
+
+- Every touched growing list endpoint returns `items` plus `meta`.
+- Max `limit` is enforced at 100 unless the approved architecture names a stricter bound.
+- Cursor endpoints return deterministic ordering and stable `next_cursor` behavior.
+- Frontend portal, insurance, AI and dashboard screens still render loading, empty, error and paged states.
+
+### T08.4 - Add Durable Worker Claiming for SLA and Knowledge Jobs
+
+**Status**
+
+- Completed.
+
+**Depends On**
+
+- T08.3.
+
+**JTBD**
+
+As an operator, I need background jobs to be claimed, retried and poisoned durably so SLA evaluation and knowledge ingestion do not duplicate work or disappear after process failures.
+
+**Description**
+
+Harden the shared job infrastructure before moving heavier AI ingestion, export generation or event dispatch into workers.
+
+**Implementation**
+
+- Add job claiming fields if missing: status, locked_by, locked_until, attempts, available_at, started_at, finished_at and truncated error.
+- Implement atomic claim-next-batch behavior with bounded batch size and worker identity.
+- Add retry backoff and poison-job terminal status after max attempts.
+- Apply durable claiming to SLA evaluation first, then knowledge ingestion dispatch.
+- Add tests for two workers racing, retry after failure, expired lock recovery and poison status.
+
+**Acceptance Criteria**
+
+- Two worker processes cannot claim the same pending job at the same time.
+- Failed jobs retry with bounded attempts and safe truncated error metadata.
+- Poison jobs remain visible for operations without blocking later jobs.
+- SLA evaluation remains idempotent when job retries happen.
+
+### T08.5 - Add Private Object Storage Provider
+
+**Status**
+
+- Completed.
+
+**Depends On**
+
+- T08.4.
+
+**JTBD**
+
+As an operator, I need uploaded and generated documents stored outside the local filesystem with private access and expiring download references.
+
+**Description**
+
+Add an S3/MinIO-compatible storage adapter behind the existing storage abstraction while preserving local storage for development.
+
+**Implementation**
+
+- Extend storage configuration with provider, bucket, endpoint, region and credential references without exposing secrets through `NEXT_PUBLIC_*`.
+- Implement a private object storage provider using the existing `core/storage.py` boundary.
+- Store file metadata in shared file assets with tenant, owner, content type, size and checksum where available.
+- Add expiring signed URL or proxy-download behavior for authorized downloads.
+- Add tests for upload metadata, unauthorized download denial, expired link behavior and local-provider compatibility.
+
+**Acceptance Criteria**
+
+- Local storage remains available for development.
+- Production storage can use private S3/MinIO-compatible buckets.
+- Download links are scoped, expiring and authorized.
+- No storage credentials are exposed to the frontend or audit logs.
+
+### T08.6 - Move Knowledge Ingestion to Durable Background Jobs
+
+**Status**
+
+- Completed.
+
+**Depends On**
+
+- T08.5.
+
+**JTBD**
+
+As an admin uploading knowledge documents, I need PDF extraction and ingestion to run asynchronously so request threads and core claim database connections are not starved.
+
+**Description**
+
+Implement the architecture rule that `knowledge_ingest` runs through shared job infrastructure with AI-owned handlers and tenant-scoped retrieval writes.
+
+**Implementation**
+
+- Make the document ingest endpoint enqueue a `knowledge_ingest` job rather than performing heavy extraction in the request path.
+- Implement the AI-domain job handler for extraction, chunking and vector/index updates.
+- Use durable worker claiming, bounded retries and poison-job behavior from `T08.4`.
+- Persist ingestion status on the knowledge document so the admin UI can show pending, processing, failed and complete states.
+- Add tests for enqueue, successful worker completion, retryable failure, poison failure and tenant-scoped chunk creation.
+
+**Acceptance Criteria**
+
+- Knowledge upload returns quickly with an ingestion status.
+- Worker ingestion creates tenant-scoped chunks and retrieval entries.
+- Failed ingestion does not block unrelated claim, queue or dashboard requests.
+- Job logs and errors do not contain raw document contents.
+
+### T08.7 - Add Transactional Domain Event Outbox
+
+**Status**
+
+- Completed.
+
+**Depends On**
+
+- T08.6.
 
 **JTBD**
 
@@ -1977,7 +2187,7 @@ Add a transactional outbox for domain events inside the modular monolith. This k
 - Add an additive migration for `domain_outbox_events` with tenant, event type, aggregate identity, producer module, safe payload, idempotency key, status, attempts, retry timestamps and truncated error fields.
 - Add a shared outbox repository/service that can append events inside the same SQLAlchemy transaction as the owning domain change.
 - Emit outbox events from high-value workflows first: incident report, claim transition, appointment request, support conversation start/message send, knowledge document ingestion and SLA alert raise/resolve.
-- Add a background worker dispatcher with bounded batch size, retry limit, status updates and safe error metadata.
+- Dispatch events through the durable worker model with bounded batch size, retry limit, status updates and safe error metadata.
 - Make event consumers idempotent by event id or aggregate/idempotency key.
 - Keep payloads PII-safe: ids, state values, reason categories and citation ids only; no raw prompts, full messages, uploaded documents or full claim narratives.
 
@@ -1989,15 +2199,83 @@ Add a transactional outbox for domain events inside the modular monolith. This k
 - Outbox queries are tenant/index-friendly and do not full-scan pending events.
 - Tests cover successful dispatch, retry behavior, duplicate event delivery and PII-safe payload shape.
 
-### T08.2 - Enforce AI Rate Limit and Provider Budget
+### T08.8 - Move Dashboard to Event-Fed Read Models
 
 **Status**
 
-- Pending.
+- Completed.
 
 **Depends On**
 
-- T08.1.
+- T08.7.
+
+**JTBD**
+
+As a dashboard maintainer, I need operational metrics isolated from private insurance schema changes so reporting can evolve without breaking claim, policy or support workflows.
+
+**Description**
+
+Refactor selected dashboard reads toward dashboard-owned read models populated from outbox events. This removes long-term shared-database coupling while keeping the modular monolith deployment model.
+
+**Implementation**
+
+- Define dashboard read model tables for claim status counts, policy activation metrics, support activity and SLA targets.
+- Populate read models from outbox events such as `ClaimTransitioned`, `PolicyActivated`, `AppointmentRequested`, `SupportConversationStarted` and `SupportMessageSent`.
+- Replace dashboard queries that depend on private insurance table layout with dashboard projections or stable query-service DTO contracts.
+- Add reconciliation job support so read models can be rebuilt from source data during migration or repair.
+- Add indexes for tenant, metric dimension, time bucket and target resource lookups.
+
+**Acceptance Criteria**
+
+- Dashboard summary/chart endpoints can read from dashboard-owned projections for the selected metrics.
+- A change to private insurance table layout does not require dashboard route/controller changes when the event contract is stable.
+- Replaying the same event does not double-count metrics or duplicate active SLA alerts.
+- Projection queries are tenant-scoped, bounded and index-backed.
+- Tests cover event projection, replay idempotency, empty projection state and reconciliation behavior.
+
+### T08.9 - Complete Command Idempotency Hardening
+
+**Status**
+
+- Completed.
+
+**Depends On**
+
+- T08.8.
+
+**JTBD**
+
+As a customer or employee on an unreliable network, I need retried create, send and transition commands to be safe so duplicate clicks or retrying clients do not create duplicate claims, messages, appointments or invalid history.
+
+**Description**
+
+Turn the documented idempotency matrix into implementation for high-risk mutation endpoints before external production traffic.
+
+**Implementation**
+
+- Add shared idempotency persistence keyed by organization, actor, endpoint/command name and `X-Idempotency-Key`.
+- Apply explicit retry behavior to incident creation, appointment request, support message send, AI-assisted message send and claim transition commands.
+- For claim transitions, combine the idempotency key with state-machine validation so identical retries return the original transition and conflicting retries return a clear conflict.
+- Store only response references and safe metadata in idempotency records, not full request bodies containing PII.
+- Add tests for duplicate key same payload, duplicate key conflicting payload, missing key where required and concurrent retry behavior.
+
+**Acceptance Criteria**
+
+- Retryable command endpoints document and enforce their idempotency behavior.
+- Repeating the same command with the same key returns the existing result or a safe no-op.
+- Reusing a key with conflicting payload returns a deterministic conflict response.
+- Idempotency records are tenant-scoped and cannot be used across organizations.
+- Audit metadata remains PII-safe and includes enough trace context to investigate duplicate submissions.
+
+### T08.10 - Enforce AI Rate Limit and Provider Budget
+
+**Status**
+
+- Completed.
+
+**Depends On**
+
+- T08.9.
 
 **JTBD**
 
@@ -2024,117 +2302,15 @@ Implement the `ai-expensive` tier as an enforceable policy for chat, retrieval a
 - Provider telemetry is useful for operations while remaining PII-safe.
 - Normal insurance read/write endpoints continue to work when AI budget is exhausted.
 
-### T08.3 - Complete Command Idempotency Hardening
+### T08.11 - Isolate AI Resource Consumption
 
 **Status**
 
-- Pending.
+- Completed.
 
 **Depends On**
 
-- T08.2.
-
-**JTBD**
-
-As a customer or employee on an unreliable network, I need retried create, send and transition commands to be safe so duplicate clicks or retrying clients do not create duplicate claims, messages, appointments or invalid history.
-
-**Description**
-
-Turn the documented idempotency matrix into implementation for high-risk mutation endpoints before external production traffic.
-
-**Implementation**
-
-- Add shared idempotency persistence keyed by organization, actor, endpoint/command name and `X-Idempotency-Key`.
-- Apply explicit retry behavior to incident creation, appointment request, support message send, AI-assisted message send and claim transition commands.
-- For claim transitions, combine the idempotency key with state-machine validation so identical retries return the original transition and conflicting retries return a clear conflict.
-- Store only response references and safe metadata in idempotency records, not full request bodies containing PII.
-- Add tests for duplicate key same payload, duplicate key conflicting payload, missing key where required and concurrent retry behavior.
-
-**Acceptance Criteria**
-
-- Retryable command endpoints document and enforce their idempotency behavior.
-- Repeating the same command with the same key returns the existing result or a safe no-op.
-- Reusing a key with conflicting payload returns a deterministic conflict response.
-- Idempotency records are tenant-scoped and cannot be used across organizations.
-- Audit metadata remains PII-safe and includes enough trace context to investigate duplicate submissions.
-
-### T08.4 - Move Dashboard to Event-Fed Read Models
-
-**Status**
-
-- Pending.
-
-**Depends On**
-
-- T08.3.
-
-**JTBD**
-
-As a dashboard maintainer, I need operational metrics to be isolated from private insurance schema changes so reporting can evolve without breaking claim, policy or support workflows.
-
-**Description**
-
-Refactor dashboard reads toward dashboard-owned read models populated from domain events. This removes long-term shared-database coupling while keeping the modular monolith deployment model.
-
-**Implementation**
-
-- Define dashboard read model tables for claim status counts, policy activation metrics, support activity and SLA targets.
-- Populate read models from outbox events such as `ClaimTransitioned`, `PolicyActivated`, `AppointmentRequested`, `SupportConversationStarted` and `SupportMessageSent`.
-- Replace dashboard queries that depend on private insurance table layout with dashboard projections or stable query-service DTO contracts.
-- Add reconciliation job support so read models can be rebuilt from source data during migration or repair.
-- Add indexes for tenant, metric dimension, time bucket and target resource lookups.
-
-**Acceptance Criteria**
-
-- Dashboard summary/chart endpoints can read from dashboard-owned projections for the selected metrics.
-- A change to private insurance table layout does not require dashboard route/controller changes when the event contract is stable.
-- Replaying the same event does not double-count metrics or duplicate active SLA alerts.
-- Projection queries are tenant-scoped, bounded and index-backed.
-- Tests cover event projection, replay idempotency, empty projection state and reconciliation behavior.
-
-### T08.5 - Unify AI and Human Support Conversation Handoff
-
-**Status**
-
-- Pending.
-
-**Depends On**
-
-- T08.4.
-
-**JTBD**
-
-As a customer, I need one continuous support conversation where AI can help first and an employee can take over without forcing me to start a separate chat.
-
-**Description**
-
-Make `Conversation` the single product-facing support surface. AI responses become assistant messages in the same thread, and low-confidence/no-source/customer-requested human escalation assigns or queues an employee follow-up.
-
-**Implementation**
-
-- Extend conversation/message DTOs to distinguish user, assistant and employee messages without exposing internal orchestration details.
-- Add handoff state or tags such as `needs_human`, `ai_no_source`, `low_confidence` and `assigned_employee_id`.
-- Route AI-assisted messages through the existing conversation authorization and idempotency flow.
-- Add service behavior that creates/updates queue work when AI cannot answer safely or the customer requests a human.
-- Update frontend chat UI to show one conversation timeline and employee takeover state.
-
-**Acceptance Criteria**
-
-- Customer uses one conversation route for AI and human support.
-- AI no-source or low-confidence result creates a visible handoff/queue signal.
-- Employee replies appear in the same authorized thread.
-- AI cannot mutate claims, policies or payments during handoff.
-- Tests cover customer handoff, employee takeover, duplicate AI retry and cross-tenant conversation access denial.
-
-### T08.6 - Isolate AI Resource Consumption
-
-**Status**
-
-- Pending.
-
-**Depends On**
-
-- T08.5.
+- T08.10.
 
 **JTBD**
 
@@ -2160,15 +2336,15 @@ Separate AI workload resource budgets from core insurance commands through conne
 - Telemetry exposes AI saturation without logging raw prompts or document contents.
 - Tests cover exhausted AI budget and continued non-AI workflow availability.
 
-### T08.7 - Add AI Evaluation Harness and Semantic Guardrails
+### T08.12 - Add AI Evaluation Harness and Semantic Guardrails
 
 **Status**
 
-- Pending.
+- Completed.
 
 **Depends On**
 
-- T08.6.
+- T08.11.
 
 **JTBD**
 
@@ -2193,6 +2369,173 @@ Add an AI quality and safety evaluation workflow. Prompt rules remain useful, bu
 - AI answer tests assert citations are present and mapped to allowed tenant knowledge chunks.
 - Metrics are documented in test output or a generated report artifact.
 - New AI provider/prompt changes have a clear pass/fail quality gate.
+
+### T08.13 - Unify AI and Human Support Conversation Handoff
+
+**Status**
+
+- Completed.
+
+**Depends On**
+
+- T08.12.
+
+**JTBD**
+
+As a customer, I need one continuous support conversation where AI can help first and an employee can take over without forcing me to start a separate chat.
+
+**Description**
+
+Make `Conversation` the single product-facing support surface. AI responses become assistant messages in the same thread, and low-confidence/no-source/customer-requested human escalation assigns or queues an employee follow-up.
+
+**Implementation**
+
+- Extend conversation/message DTOs to distinguish user, assistant and employee messages without exposing internal orchestration details.
+- Add handoff state or tags such as `needs_human`, `ai_no_source`, `low_confidence` and `assigned_employee_id`.
+- Route AI-assisted messages through the existing conversation authorization and idempotency flow.
+- Add service behavior that creates/updates queue work when AI cannot answer safely or the customer requests a human.
+- Update frontend chat UI to show one conversation timeline and employee takeover state.
+
+**Acceptance Criteria**
+
+- Customer uses one conversation route for AI and human support.
+- AI no-source or low-confidence result creates a visible handoff/queue signal.
+- Employee replies appear in the same authorized thread.
+- AI cannot mutate claims, policies or payments during handoff.
+- Tests cover customer handoff, employee takeover, duplicate AI retry and cross-tenant conversation access denial.
+
+### T08.14 - Complete Reviewer Correction Workflow
+
+**Status**
+
+- Completed.
+
+**Depends On**
+
+- T08.13.
+
+**JTBD**
+
+As a claim reviewer, I need to edit, save, approve and review correction history so claim decisions and extracted details can be corrected without bypassing lifecycle auditability.
+
+**Description**
+
+Add the reviewer correction UI and backend workflow named in the approved production roadmap. Corrections must remain inside `insurance` claim ownership and must not mutate claim state except through explicit lifecycle actions.
+
+**Implementation**
+
+- Define correction records or safe metadata fields for claim reviewer edits, approval state and history.
+- Add service methods for draft save, approval and history retrieval with object authorization.
+- Add endpoints under the claim/reviewer surface with `write-command` and `read-list` tiers as appropriate.
+- Add frontend controls on the claim detail page for edit, save, approve and correction history.
+- Audit correction changes with ids and changed field names, not full sensitive narratives.
+
+**Acceptance Criteria**
+
+- Reviewer can save a correction draft and later approve it.
+- Correction history is tenant-scoped and claim-scoped.
+- Customer role cannot access internal correction controls unless a customer-safe field is explicitly exposed.
+- Claim lifecycle transitions remain governed by the claim state machine.
+- Tests cover authorization, audit metadata, validation and history ordering.
+
+### T08.15 - Generate Export Artifacts with Expiring Downloads
+
+**Status**
+
+- Completed.
+
+**Depends On**
+
+- T08.14.
+- T08.5.
+
+**JTBD**
+
+As an employee or admin, I need claim and operations export artifacts generated safely so reports can be downloaded without exposing permanent public files.
+
+**Description**
+
+Implement real export generation and download using the private storage provider. Export tasks must use background jobs when generation is slow and must expose expiring authorized download references.
+
+**Implementation**
+
+- Define export request, artifact metadata and status DTOs.
+- Generate selected artifacts for claim detail/history and dashboard/SLA summaries, starting with the smallest useful scope.
+- Store generated files through the private storage provider and shared file metadata.
+- Return expiring download references only after object-level authorization.
+- Add tests for export request, worker generation, storage metadata, unauthorized download denial and expired link behavior.
+
+**Acceptance Criteria**
+
+- Export artifact generation produces a real downloadable file.
+- Download references expire and require authorization.
+- Export metadata is tenant-scoped and does not expose another tenant's files.
+- Long-running export generation does not block request threads.
+
+### T08.16 - Add Frontend Fetch Timeout, Retry and Backend-Unavailable States
+
+**Status**
+
+- Completed.
+
+**Depends On**
+
+- T08.15.
+
+**JTBD**
+
+As a user, I need clear feedback when the backend is slow or unavailable so the frontend does not pretend sensitive data is empty or silently fall back to demo content.
+
+**Description**
+
+Harden the centralized frontend API client and primary feature routes for timeout, retry and backend-unavailable behavior.
+
+**Implementation**
+
+- Add fetch timeout support and narrowly scoped retry behavior for safe idempotent reads.
+- Keep mutation retries disabled unless the command uses the implemented idempotency key behavior.
+- Add shared error types for unauthorized, forbidden, validation, timeout and backend unavailable.
+- Update `/portal`, `/insurance`, `/insurance/claims/[id]`, `/ai` and `/dashboard` to render backend-unavailable states explicitly.
+- Add a frontend unsafe-pattern scan and build verification after the updates.
+
+**Acceptance Criteria**
+
+- Backend outage does not trigger silent demo-data fallback on authenticated sensitive screens.
+- Timeout and backend-unavailable states are visible and distinct from empty data.
+- Mutations are not retried without idempotency protection.
+- Frontend build passes and unsafe-pattern scan remains clean.
+
+### T08.17 - Add End-to-End Production Smoke Tests
+
+**Status**
+
+- Completed. Runtime execution pending local API/worker startup; the current environment returned `Connection refused` for `localhost:8002`.
+
+**Depends On**
+
+- T08.16.
+
+**JTBD**
+
+As a maintainer, I need a repeatable end-to-end smoke suite for the approved architecture so future agents can verify portal upload, incident triage, claim transition, support chat, SLA and export workflows together.
+
+**Description**
+
+Create an executable or documented E2E smoke path for the production-readiness surface. This is the final gate after auth, storage, workers, idempotency, AI and frontend error handling are complete.
+
+**Implementation**
+
+- Add an E2E smoke script or checklist that starts from seeded/demo data and exercises portal incident/report flow, employee queue triage, claim transition, support conversation, AI fallback, SLA alert visibility and export download.
+- Include forbidden checks for customer accessing admin queue, employee accessing another tenant and expired export download.
+- Run backend tests, frontend build and migration checks before the E2E smoke path.
+- Document required local ports, env vars and seed command.
+
+**Acceptance Criteria**
+
+- E2E smoke path covers portal upload/report, incident triage, claim transition and export download.
+- Negative authorization checks are included and expected to fail safely.
+- The smoke path can be repeated from a clean local seed without manual database edits.
+- Results are recorded in `docs/PLAN.md` or a linked test artifact with pass/fail expectations.
 
 ## Verification Checklist
 
@@ -2248,8 +2591,34 @@ X-Role: admin | employee | customer
 - Dashboard: `GET /dashboard/summary` returns additive `metrics`; `GET /dashboard/alerts` is admin-only.
 - Production auth: with `ENVIRONMENT=production` and no bearer token, demo headers alone must return `401 missing_access_token`.
 
+### Executable E2E Smoke
+
+Run after migrations, demo seed, API server and background worker are active:
+
+```bash
+cd backend
+SMOKE_API_BASE_URL=http://localhost:8002/api/v1 python3 -m scripts.run_e2e_smoke
+```
+
+Expected result: every step prints `PASS`, including customer incident report,
+employee triage, unified support fallback, dashboard/SLA reads, worker-generated
+private export download, customer admin-queue denial, cross-tenant claim denial
+and expired download-token denial.
+
 ### Migration And Data Checks
 
 - Apply Alembic migrations in order from `0001_schema_backbone` through the latest revision.
 - Confirm additive migrations preserve existing rows: queue fields default priority, claim state defaults to `reported`, message role defaults to `user`, conversation `claim_id` is nullable.
 - For SLA alerts, running evaluation twice must not create duplicate active alerts for the same tenant, target type and target id.
+
+### Production Readiness Gate
+
+Run after any pending `T08.*` task that touches auth, workers, storage, outbox, AI, frontend API handling or exports:
+
+- Production-like auth rejects demo headers and incomplete SSO configuration.
+- Worker claiming prevents duplicate job execution under two worker processes.
+- Object storage downloads are private, authorized and expiring.
+- Outbox dispatch and dashboard projections are replay-idempotent where implemented.
+- Retryable mutations enforce `X-Idempotency-Key` or documented repeat-safe behavior.
+- AI requests enforce per-user/per-tenant budgets and never widen tenant-scoped retrieval on failure.
+- Frontend timeout/backend-unavailable states do not fall back to static demo data.

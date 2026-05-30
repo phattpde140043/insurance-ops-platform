@@ -9,6 +9,7 @@ from app.domains.insurance.repositories import (
 )
 from app.domains.insurance.schemas import CreateAssignmentIn
 from app.domains.platform.audit_service import AuditEventCreate, AuditLogService
+from app.domains.shared.outbox_service import DomainOutboxService
 
 
 class InsuranceAssignmentService:
@@ -17,6 +18,7 @@ class InsuranceAssignmentService:
         self.customers = InsuranceCustomerRepository(session)
         self.assignments = InsuranceEmployeeAssignmentRepository(session)
         self.audit_log = AuditLogService(session)
+        self.outbox = DomainOutboxService(session)
 
     async def create_assignment(
         self,
@@ -52,6 +54,18 @@ class InsuranceAssignmentService:
                 metadata={"employee_user_id": payload.employee_user_id},
             )
         )
+        await self.outbox.append(
+            organization_id=organization_id,
+            event_type="CustomerAssigned",
+            aggregate_type="insurance_assignment",
+            aggregate_id=assignment.id,
+            producer_module="insurance",
+            payload={
+                "customer_id": payload.customer_id,
+                "employee_user_id": payload.employee_user_id,
+                "status": payload.status,
+            },
+        )
         await self.session.commit()
         return self._serialize(assignment)
 
@@ -66,4 +80,3 @@ class InsuranceAssignmentService:
             if assignment.created_at
             else "",
         }
-

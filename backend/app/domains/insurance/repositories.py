@@ -4,6 +4,7 @@ from sqlalchemy import or_, select
 from app.core.repository import BaseRepository
 from app.domains.insurance.models import (
     InsuranceClaimTransition,
+    InsuranceClaimCorrection,
     InsuranceCustomer,
     InsuranceEmployeeAssignment,
     InsuranceIncidentReport,
@@ -128,6 +129,25 @@ class InsuranceClaimTransitionRepository(BaseRepository[InsuranceClaimTransition
         return list(result.all())
 
 
+class InsuranceClaimCorrectionRepository(BaseRepository[InsuranceClaimCorrection]):
+    def __init__(self, session: AsyncSession) -> None:
+        super().__init__(session, InsuranceClaimCorrection)
+
+    async def list_for_claim(
+        self, organization_id: str, claim_id: str, *, limit: int = 100
+    ) -> list[InsuranceClaimCorrection]:
+        result = await self.session.scalars(
+            select(InsuranceClaimCorrection)
+            .where(
+                InsuranceClaimCorrection.organization_id == organization_id,
+                InsuranceClaimCorrection.claim_id == claim_id,
+            )
+            .order_by(InsuranceClaimCorrection.created_at.desc())
+            .limit(limit)
+        )
+        return list(result.all())
+
+
 class InsuranceAppointmentRepository(BaseRepository[InsuranceAppointment]):
     def __init__(self, session: AsyncSession) -> None:
         super().__init__(session, InsuranceAppointment)
@@ -200,6 +220,7 @@ class InsuranceMessageRepository(BaseRepository[InsuranceMessage]):
         conversation_id: str,
         *,
         limit: int = 50,
+        offset: int = 0,
     ) -> list[InsuranceMessage]:
         result = await self.session.scalars(
             select(InsuranceMessage)
@@ -209,5 +230,6 @@ class InsuranceMessageRepository(BaseRepository[InsuranceMessage]):
             )
             .order_by(InsuranceMessage.created_at.asc())
             .limit(limit)
+            .offset(offset)
         )
         return list(result.all())

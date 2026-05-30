@@ -1,13 +1,9 @@
-import { apiGet } from "./api-client";
+import { apiGet, type PaginatedResponse } from "./api-client";
 
 const adminDemoContext = {
   organizationId: "org_demo",
   userId: "user_admin",
   role: "admin"
-};
-
-type ListResponse<T> = {
-  items: T[];
 };
 
 export type DashboardCard = {
@@ -60,7 +56,7 @@ export async function getDashboardCharts(): Promise<ChartSeries[]> {
 }
 
 export async function getSlaAlerts(): Promise<SlaAlert[]> {
-  const response = await apiGet<ListResponse<SlaAlert>>(
+  const response = await apiGet<PaginatedResponse<SlaAlert>>(
     "/dashboard/alerts",
     adminDemoContext
   );

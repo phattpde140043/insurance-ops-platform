@@ -69,6 +69,14 @@ class FakeSession:
         self.committed = True
 
 
+class FakeIdempotency:
+    async def reserve(self, **_kwargs):
+        return SimpleNamespace(replayed=False, record=SimpleNamespace())
+
+    def complete(self, *_args, **_kwargs) -> None:
+        pass
+
+
 def build_portal_service(customer, *, conversations=None) -> CustomerPortalService:
     service = CustomerPortalService.__new__(CustomerPortalService)
     service.session = FakeSession()
@@ -145,6 +153,7 @@ def build_portal_service(customer, *, conversations=None) -> CustomerPortalServi
         ]
     )
     service.audit_log = FakeAuditLog()
+    service.idempotency = FakeIdempotency()
     return service
 
 
@@ -257,6 +266,7 @@ async def test_portal_appointment_request_resolves_customer_and_employee() -> No
     result = await service.request_appointment(
         organization_id="org_alpha",
         user_id="user_customer",
+        idempotency_key="appointment-1",
         payload=CreatePortalAppointmentIn(scheduled_at="2026-06-01T10:00:00Z"),
     )
 
@@ -285,6 +295,7 @@ async def test_portal_conversation_start_resolves_customer_scope() -> None:
     result = await service.start_conversation(
         organization_id="org_alpha",
         user_id="user_customer",
+        idempotency_key="conversation-1",
         payload=CreatePortalConversationIn(),
     )
 

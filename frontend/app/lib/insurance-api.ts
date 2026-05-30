@@ -1,8 +1,4 @@
-import { apiGet } from "./api-client";
-
-type ListResponse<T> = {
-  items: T[];
-};
+import { apiGet, type PaginatedResponse } from "./api-client";
 
 export type InsuranceCustomer = {
   id: string;
@@ -23,7 +19,7 @@ export type InsuranceCustomerRow = {
 };
 
 export async function getInsuranceCustomers(): Promise<InsuranceCustomerRow[]> {
-  const response = await apiGet<ListResponse<InsuranceCustomer>>(
+  const response = await apiGet<PaginatedResponse<InsuranceCustomer>>(
     "/insurance/customers"
   );
   return response.items.map((customer) => ({

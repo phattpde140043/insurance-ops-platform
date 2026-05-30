@@ -119,6 +119,8 @@ class ConversationOut(BaseModel):
     claim_id: str | None = None
     employee_user_id: str | None = None
     status: str
+    needs_human: bool = False
+    handoff_reason: str | None = None
     created_at: str
 
 
@@ -171,6 +173,39 @@ class UpdateQueueItemIn(BaseModel):
 
 class ClaimDetailOut(IncidentOut):
     allowed_transitions: list[str] = []
+
+
+class SaveClaimCorrectionIn(BaseModel):
+    corrected_fields: dict[str, str | None]
+
+
+class ClaimCorrectionOut(BaseModel):
+    id: str
+    organization_id: str
+    claim_id: str
+    reviewer_user_id: str
+    status: str
+    corrected_fields: dict
+    changed_fields: list[str]
+    approved_by_user_id: str | None = None
+    approved_at: str | None = None
+    created_at: str
+
+
+class ExportArtifactOut(BaseModel):
+    id: str
+    organization_id: str
+    artifact_type: str
+    resource_type: str
+    resource_id: str
+    status: str
+    file_asset_id: str | None = None
+    created_at: str
+
+
+class ExportDownloadOut(BaseModel):
+    download_url: str
+    expires_in: int
 
 
 class CreateClaimTransitionIn(BaseModel):

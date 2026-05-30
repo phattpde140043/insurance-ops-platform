@@ -1,6 +1,6 @@
 from typing import Annotated
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.context import RequestContext, get_request_context, require_roles
@@ -14,7 +14,13 @@ from app.domains.platform.schemas import (
     OrganizationOut,
     UserOut,
 )
-from app.domains.shared.schemas import ListResponse, StatusResponse
+from app.domains.shared.schemas import (
+    ListResponse,
+    StatusResponse,
+    decode_offset_cursor,
+    encode_offset_cursor,
+    paginated_response,
+)
 
 router = APIRouter(tags=["platform"])
 
@@ -32,17 +38,26 @@ async def get_me(
 
 
 @router.get("/organizations", response_model=ListResponse[OrganizationOut])
-async def list_organizations() -> dict:
-    return {"items": store.organizations}
+async def list_organizations(
+    limit: Annotated[int, Query(ge=1, le=100)] = 50,
+    offset: Annotated[int, Query(ge=0)] = 0,
+) -> dict:
+    items = store.organizations[offset : offset + limit + 1]
+    return paginated_response(items, limit=limit, sort="name", offset=offset)
 
 
 @router.get("/admin/users", response_model=ListResponse[UserOut])
 async def list_users(
     context: Annotated[RequestContext, Depends(require_roles("admin"))],
     session: Annotated[AsyncSession, Depends(get_db_session)],
+    limit: Annotated[int, Query(ge=1, le=100)] = 50,
+    offset: Annotated[int, Query(ge=0)] = 0,
 ) -> dict:
     service = AdminUserService(session)
-    return {"items": await service.list_users(context.organization_id)}
+    items = await service.list_users(
+        context.organization_id, limit=limit + 1, offset=offset
+    )
+    return paginated_response(items, limit=limit, sort="-created_at", offset=offset)
 
 
 @router.post("/admin/users", response_model=UserOut)
@@ -78,6 +93,18 @@ async def reset_user_password(
 async def list_audit_events(
     context: Annotated[RequestContext, Depends(require_roles("admin"))],
     session: Annotated[AsyncSession, Depends(get_db_session)],
+    limit: Annotated[int, Query(ge=1, le=100)] = 50,
+    cursor: str | None = None,
 ) -> dict:
     service = AdminUserService(session)
-    return {"items": await service.list_audit_events(context.organization_id)}
+    offset = decode_offset_cursor(cursor)
+    items = await service.list_audit_events(
+        context.organization_id, limit=limit + 1, offset=offset
+    )
+    return paginated_response(
+        items,
+        limit=limit,
+        sort="-created_at",
+        offset=offset,
+        next_cursor=encode_offset_cursor(offset + limit),
+    )

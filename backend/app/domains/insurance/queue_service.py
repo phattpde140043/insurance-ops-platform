@@ -349,7 +349,7 @@ class WorkloadQueueService:
         )
 
     def _bounded_limit(self, limit: int) -> int:
-        return min(max(limit, 1), 100)
+        return min(max(limit, 1), 101)
 
     async def get_item(
         self,

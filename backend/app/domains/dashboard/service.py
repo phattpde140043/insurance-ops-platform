@@ -14,31 +14,33 @@ from app.domains.insurance.models import (
 )
 from app.domains.platform.models import AuditEvent
 from app.domains.dashboard.models import SlaAlert
+from app.domains.dashboard.projection_service import DashboardProjectionService
+from app.domains.shared.job_service import BackgroundJobService, BackgroundJobType
 
 
 class DashboardAggregationService:
     def __init__(self, session: AsyncSession) -> None:
         self.session = session
+        self.projections = DashboardProjectionService(session)
+        self.jobs = BackgroundJobService(session)
 
     async def get_summary(self, *, organization_id: str, role: str) -> dict:
         customers = await self._count(InsuranceCustomer, organization_id)
         policies = await self._count(InsurancePolicy, organization_id)
         incidents = await self._count(InsuranceIncidentReport, organization_id)
         audit_events = await self._count(AuditEvent, organization_id)
-        claim_states = await self._count_by_column(
-            InsuranceIncidentReport,
-            InsuranceIncidentReport.claim_state,
-            organization_id,
-        )
+        claim_states = await self._projection_dimensions(organization_id, "claim_states")
         queue_status = await self._queue_status_counts(organization_id)
         overdue_work_items = await self._overdue_work_item_count(organization_id)
         support_activity = {
-            "open_conversations": await self._count_matching(
-                InsuranceConversation,
+            "open_conversations": await self._projection_value(
                 organization_id,
-                InsuranceConversation.status == "open",
+                "support_activity",
+                "open_conversations",
             ),
-            "messages": await self._count(InsuranceMessage, organization_id),
+            "messages": await self._projection_value(
+                organization_id, "support_activity", "messages"
+            ),
         }
         return {
             "role": role,
@@ -58,6 +60,9 @@ class DashboardAggregationService:
                 "queue_status": queue_status,
                 "overdue_work_items": overdue_work_items,
                 "support_activity": support_activity,
+                "active_policies": await self._projection_value(
+                    organization_id, "policies", "active"
+                ),
             },
         }
 
@@ -69,11 +74,7 @@ class DashboardAggregationService:
         return summary
 
     async def get_chart_series(self, *, organization_id: str) -> dict:
-        claim_states = await self._count_by_column(
-            InsuranceIncidentReport,
-            InsuranceIncidentReport.claim_state,
-            organization_id,
-        )
+        claim_states = await self._projection_dimensions(organization_id, "claim_states")
         queue_status = await self._queue_status_counts(organization_id)
         return {
             "series": [
@@ -90,8 +91,24 @@ class DashboardAggregationService:
             ]
         }
 
+    async def queue_reconciliation(
+        self, *, organization_id: str, actor_user_id: str
+    ) -> dict:
+        job = await self.jobs.create_job(
+            organization_id=organization_id,
+            actor_user_id=actor_user_id,
+            job_type=BackgroundJobType.DASHBOARD_RECONCILE.value,
+            resource_type="dashboard_projection",
+        )
+        return {"status": "queued", "background_job_id": job.id}
+
     async def list_sla_alerts(
-        self, *, organization_id: str, status: str | None = None, limit: int = 25
+        self,
+        *,
+        organization_id: str,
+        status: str | None = None,
+        limit: int = 25,
+        offset: int = 0,
     ) -> list[dict]:
         conditions = [SlaAlert.organization_id == organization_id]
         if status:
@@ -100,12 +117,23 @@ class DashboardAggregationService:
             select(SlaAlert)
             .where(*conditions)
             .order_by(SlaAlert.breached_at.desc())
-            .limit(min(max(limit, 1), 100))
+            .limit(min(max(limit, 1), 101))
+            .offset(max(offset, 0))
         )
         return [self._serialize_alert(alert) for alert in result.all()]
 
     async def _count(self, model: type, organization_id: str) -> int:
         return await self._count_matching(model, organization_id)
+
+    async def _projection_dimensions(
+        self, organization_id: str, metric_key: str
+    ) -> dict[str, int]:
+        return await self.projections.read_dimensions(organization_id, metric_key)
+
+    async def _projection_value(
+        self, organization_id: str, metric_key: str, dimension: str
+    ) -> int:
+        return await self.projections.read_value(organization_id, metric_key, dimension)
 
     async def _count_matching(self, model: type, organization_id: str, *conditions) -> int:
         value = await self.session.scalar(

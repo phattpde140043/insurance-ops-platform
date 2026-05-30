@@ -1,12 +1,15 @@
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Header, Query, Response
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.context import RequestContext, get_request_context, require_roles
 from app.core.database import get_db_session
+from app.core.storage import get_storage_provider, verify_storage_download_token
 from app.domains.insurance.assignment_service import InsuranceAssignmentService
 from app.domains.insurance.claim_lifecycle_service import ClaimLifecycleService
+from app.domains.insurance.correction_service import ClaimCorrectionService
+from app.domains.insurance.export_service import ClaimExportService
 from app.domains.insurance.customer_policy_service import InsuranceCustomerPolicyService
 from app.domains.insurance.incident_service import InsuranceIncidentService
 from app.domains.insurance.plan_service import InsurancePlanService
@@ -17,10 +20,14 @@ from app.domains.insurance.schemas import (
     AppointmentOut,
     ClaimDetailOut,
     ClaimTransitionOut,
+    ClaimCorrectionOut,
+    ExportArtifactOut,
+    ExportDownloadOut,
     ConversationDetailOut,
     CreateAssignmentIn,
     CreateAppointmentIn,
     CreateClaimTransitionIn,
+    SaveClaimCorrectionIn,
     CreateConversationIn,
     CreateCustomerIn,
     CreateIncidentIn,
@@ -40,7 +47,12 @@ from app.domains.insurance.schemas import (
     QueueItemOut,
     UpdateQueueItemIn,
 )
-from app.domains.shared.schemas import ListResponse
+from app.domains.shared.schemas import (
+    ListResponse,
+    decode_offset_cursor,
+    encode_offset_cursor,
+    paginated_response,
+)
 
 router = APIRouter(prefix="/insurance", tags=["insurance"])
 
@@ -66,15 +78,14 @@ async def list_my_workload_queue(
     limit: Annotated[int, Query(ge=1, le=100)] = 25,
 ) -> dict:
     service = WorkloadQueueService(session)
-    return {
-        "items": await service.list_my_queue(
+    items = await service.list_my_queue(
             organization_id=context.organization_id,
             employee_user_id=context.user_id,
             status=status,
             priority=priority,
-            limit=limit,
+            limit=limit + 1,
         )
-    }
+    return paginated_response(items, limit=limit, sort="due_at,+priority,-updated_at")
 
 
 @router.get("/queues", response_model=ListResponse[QueueItemOut])
@@ -86,14 +97,13 @@ async def list_admin_workload_queue(
     limit: Annotated[int, Query(ge=1, le=100)] = 25,
 ) -> dict:
     service = WorkloadQueueService(session)
-    return {
-        "items": await service.list_admin_queue(
+    items = await service.list_admin_queue(
             organization_id=context.organization_id,
             status=status,
             priority=priority,
-            limit=limit,
+            limit=limit + 1,
         )
-    }
+    return paginated_response(items, limit=limit, sort="due_at,+priority,-updated_at")
 
 
 @router.get("/queues/{item_id}", response_model=QueueItemOut)
@@ -135,13 +145,12 @@ async def list_customer_portal_policies(
     limit: Annotated[int, Query(ge=1, le=100)] = 25,
 ) -> dict:
     service = CustomerPortalService(session)
-    return {
-        "items": await service.list_policies(
+    items = await service.list_policies(
             organization_id=context.organization_id,
             user_id=context.user_id,
-            limit=limit,
+            limit=limit + 1,
         )
-    }
+    return paginated_response(items, limit=limit, sort="-created_at")
 
 
 @router.get("/portal/incidents", response_model=ListResponse[IncidentOut])
@@ -151,13 +160,12 @@ async def list_customer_portal_incidents(
     limit: Annotated[int, Query(ge=1, le=100)] = 25,
 ) -> dict:
     service = CustomerPortalService(session)
-    return {
-        "items": await service.list_incidents(
+    items = await service.list_incidents(
             organization_id=context.organization_id,
             user_id=context.user_id,
-            limit=limit,
+            limit=limit + 1,
         )
-    }
+    return paginated_response(items, limit=limit, sort="-created_at")
 
 
 @router.get("/portal/appointments", response_model=ListResponse[AppointmentOut])
@@ -167,13 +175,12 @@ async def list_customer_portal_appointments(
     limit: Annotated[int, Query(ge=1, le=100)] = 25,
 ) -> dict:
     service = CustomerPortalService(session)
-    return {
-        "items": await service.list_appointments(
+    items = await service.list_appointments(
             organization_id=context.organization_id,
             user_id=context.user_id,
-            limit=limit,
+            limit=limit + 1,
         )
-    }
+    return paginated_response(items, limit=limit, sort="scheduled_at")
 
 
 @router.post("/portal/appointments", response_model=AppointmentOut)
@@ -181,11 +188,13 @@ async def request_customer_portal_appointment(
     payload: CreatePortalAppointmentIn,
     context: Annotated[RequestContext, Depends(require_roles("customer"))],
     session: Annotated[AsyncSession, Depends(get_db_session)],
+    idempotency_key: Annotated[str, Header(alias="X-Idempotency-Key")],
 ) -> dict:
     service = CustomerPortalService(session)
     return await service.request_appointment(
         organization_id=context.organization_id,
         user_id=context.user_id,
+        idempotency_key=idempotency_key,
         payload=payload,
     )
 
@@ -197,13 +206,12 @@ async def list_customer_portal_conversations(
     limit: Annotated[int, Query(ge=1, le=100)] = 25,
 ) -> dict:
     service = CustomerPortalService(session)
-    return {
-        "items": await service.list_conversations(
+    items = await service.list_conversations(
             organization_id=context.organization_id,
             user_id=context.user_id,
-            limit=limit,
+            limit=limit + 1,
         )
-    }
+    return paginated_response(items, limit=limit, sort="-created_at")
 
 
 @router.post("/portal/conversations", response_model=ConversationOut)
@@ -211,11 +219,13 @@ async def start_customer_portal_conversation(
     payload: CreatePortalConversationIn,
     context: Annotated[RequestContext, Depends(require_roles("customer"))],
     session: Annotated[AsyncSession, Depends(get_db_session)],
+    idempotency_key: Annotated[str, Header(alias="X-Idempotency-Key")],
 ) -> dict:
     service = CustomerPortalService(session)
     return await service.start_conversation(
         organization_id=context.organization_id,
         user_id=context.user_id,
+        idempotency_key=idempotency_key,
         payload=payload,
     )
 
@@ -247,15 +257,14 @@ async def list_claim_history(
     limit: Annotated[int, Query(ge=1, le=100)] = 100,
 ) -> dict:
     service = ClaimLifecycleService(session)
-    return {
-        "items": await service.list_claim_history(
+    items = await service.list_claim_history(
             organization_id=context.organization_id,
             claim_id=claim_id,
             actor_user_id=context.user_id,
             role=context.role,
-            limit=limit,
+            limit=limit + 1,
         )
-    }
+    return paginated_response(items, limit=limit, sort="created_at")
 
 
 @router.post("/claims/{claim_id}/transitions", response_model=ClaimDetailOut)
@@ -264,6 +273,7 @@ async def transition_claim(
     payload: CreateClaimTransitionIn,
     context: Annotated[RequestContext, Depends(require_roles("admin", "employee"))],
     session: Annotated[AsyncSession, Depends(get_db_session)],
+    idempotency_key: Annotated[str, Header(alias="X-Idempotency-Key")],
 ) -> dict:
     service = ClaimLifecycleService(session)
     return await service.transition_claim(
@@ -271,6 +281,7 @@ async def transition_claim(
         claim_id=claim_id,
         actor_user_id=context.user_id,
         role=context.role,
+        idempotency_key=idempotency_key,
         payload=payload,
     )
 
@@ -282,6 +293,7 @@ async def open_claim_conversation(
         RequestContext, Depends(require_roles("admin", "employee", "customer"))
     ],
     session: Annotated[AsyncSession, Depends(get_db_session)],
+    idempotency_key: Annotated[str, Header(alias="X-Idempotency-Key")],
 ) -> dict:
     service = InsuranceSupportService(session)
     return await service.open_claim_conversation(
@@ -289,7 +301,113 @@ async def open_claim_conversation(
         actor_user_id=context.user_id,
         role=context.role,
         claim_id=claim_id,
+        idempotency_key=idempotency_key,
     )
+
+
+@router.get("/claims/{claim_id}/corrections", response_model=ListResponse[ClaimCorrectionOut])
+async def list_claim_corrections(
+    claim_id: str,
+    context: Annotated[RequestContext, Depends(require_roles("admin", "employee"))],
+    session: Annotated[AsyncSession, Depends(get_db_session)],
+    limit: Annotated[int, Query(ge=1, le=100)] = 100,
+) -> dict:
+    items = await ClaimCorrectionService(session).list_history(
+        organization_id=context.organization_id,
+        claim_id=claim_id,
+        actor_user_id=context.user_id,
+        role=context.role,
+        limit=limit + 1,
+    )
+    return paginated_response(items, limit=limit, sort="-created_at")
+
+
+@router.post("/claims/{claim_id}/corrections", response_model=ClaimCorrectionOut)
+async def save_claim_correction(
+    claim_id: str,
+    payload: SaveClaimCorrectionIn,
+    context: Annotated[RequestContext, Depends(require_roles("admin", "employee"))],
+    session: Annotated[AsyncSession, Depends(get_db_session)],
+    idempotency_key: Annotated[str, Header(alias="X-Idempotency-Key")],
+) -> dict:
+    return await ClaimCorrectionService(session).save_draft(
+        organization_id=context.organization_id,
+        claim_id=claim_id,
+        actor_user_id=context.user_id,
+        role=context.role,
+        idempotency_key=idempotency_key,
+        payload=payload,
+    )
+
+
+@router.post(
+    "/claims/{claim_id}/corrections/{correction_id}/approve",
+    response_model=ClaimCorrectionOut,
+)
+async def approve_claim_correction(
+    claim_id: str,
+    correction_id: str,
+    context: Annotated[RequestContext, Depends(require_roles("admin", "employee"))],
+    session: Annotated[AsyncSession, Depends(get_db_session)],
+    idempotency_key: Annotated[str, Header(alias="X-Idempotency-Key")],
+) -> dict:
+    return await ClaimCorrectionService(session).approve(
+        organization_id=context.organization_id,
+        claim_id=claim_id,
+        correction_id=correction_id,
+        actor_user_id=context.user_id,
+        role=context.role,
+        idempotency_key=idempotency_key,
+    )
+
+
+@router.post("/claims/{claim_id}/exports", response_model=ExportArtifactOut)
+async def request_claim_export(
+    claim_id: str,
+    context: Annotated[RequestContext, Depends(require_roles("admin", "employee"))],
+    session: Annotated[AsyncSession, Depends(get_db_session)],
+) -> dict:
+    return await ClaimExportService(session).request_claim_export(
+        organization_id=context.organization_id,
+        claim_id=claim_id,
+        actor_user_id=context.user_id,
+        role=context.role,
+    )
+
+
+@router.get("/exports/{artifact_id}", response_model=ExportArtifactOut)
+async def get_export_artifact(
+    artifact_id: str,
+    context: Annotated[RequestContext, Depends(require_roles("admin", "employee"))],
+    session: Annotated[AsyncSession, Depends(get_db_session)],
+) -> dict:
+    return await ClaimExportService(session).get_artifact(
+        organization_id=context.organization_id,
+        artifact_id=artifact_id,
+        actor_user_id=context.user_id,
+        role=context.role,
+    )
+
+
+@router.get("/exports/{artifact_id}/download", response_model=ExportDownloadOut)
+async def create_export_download(
+    artifact_id: str,
+    context: Annotated[RequestContext, Depends(require_roles("admin", "employee"))],
+    session: Annotated[AsyncSession, Depends(get_db_session)],
+) -> dict:
+    return await ClaimExportService(session).create_download_reference(
+        organization_id=context.organization_id,
+        artifact_id=artifact_id,
+        actor_user_id=context.user_id,
+        role=context.role,
+    )
+
+
+@router.get("/exports/downloads/content")
+async def download_export_content(token: str) -> Response:
+    _organization_id, storage_key = verify_storage_download_token(token)
+    content = await get_storage_provider().get_bytes(storage_key)
+    return Response(content=content, media_type="text/csv")
 
 
 @router.get("/plans", response_model=ListResponse[InsurancePlanOut])
@@ -299,7 +417,8 @@ async def list_plans(
     limit: Annotated[int, Query(ge=1, le=100)] = 50,
 ) -> dict:
     service = InsurancePlanService(session)
-    return {"items": await service.list_plans(context.organization_id, limit=limit)}
+    items = await service.list_plans(context.organization_id, limit=limit + 1)
+    return paginated_response(items, limit=limit, sort="name")
 
 
 @router.post("/plans", response_model=InsurancePlanOut)
@@ -324,13 +443,12 @@ async def list_customers(
 ) -> dict:
     service = InsuranceCustomerPolicyService(session)
     employee_user_id = context.user_id if context.role == "employee" else None
-    return {
-        "items": await service.list_customers(
+    items = await service.list_customers(
             context.organization_id,
             employee_user_id=employee_user_id,
-            limit=limit,
+            limit=limit + 1,
         )
-    }
+    return paginated_response(items, limit=limit, sort="-created_at")
 
 
 @router.post("/customers", response_model=CustomerOut)
@@ -352,11 +470,13 @@ async def create_policy(
     payload: CreatePolicyIn,
     context: Annotated[RequestContext, Depends(require_roles("admin", "employee"))],
     session: Annotated[AsyncSession, Depends(get_db_session)],
+    idempotency_key: Annotated[str, Header(alias="X-Idempotency-Key")],
 ) -> dict:
     service = InsuranceCustomerPolicyService(session)
     return await service.create_policy(
         organization_id=context.organization_id,
         actor_user_id=context.user_id,
+        idempotency_key=idempotency_key,
         payload=payload,
     )
 
@@ -368,7 +488,8 @@ async def list_policies(
     limit: Annotated[int, Query(ge=1, le=100)] = 50,
 ) -> dict:
     service = InsuranceCustomerPolicyService(session)
-    return {"items": await service.list_policies(context.organization_id, limit=limit)}
+    items = await service.list_policies(context.organization_id, limit=limit + 1)
+    return paginated_response(items, limit=limit, sort="-created_at")
 
 
 @router.post("/assignments", response_model=AssignmentOut)
@@ -392,11 +513,14 @@ async def create_incident(
         RequestContext, Depends(require_roles("admin", "employee", "customer"))
     ],
     session: Annotated[AsyncSession, Depends(get_db_session)],
+    idempotency_key: Annotated[str, Header(alias="X-Idempotency-Key")],
 ) -> dict:
     service = InsuranceIncidentService(session)
     return await service.create_incident(
         organization_id=context.organization_id,
         actor_user_id=context.user_id,
+        role=context.role,
+        idempotency_key=idempotency_key,
         payload=payload,
     )
 
@@ -408,7 +532,8 @@ async def list_incidents(
     limit: Annotated[int, Query(ge=1, le=100)] = 50,
 ) -> dict:
     service = InsuranceIncidentService(session)
-    return {"items": await service.list_incidents(context.organization_id, limit=limit)}
+    items = await service.list_incidents(context.organization_id, limit=limit + 1)
+    return paginated_response(items, limit=limit, sort="-created_at")
 
 
 @router.post("/appointments", response_model=AppointmentOut)
@@ -418,11 +543,13 @@ async def create_appointment(
         RequestContext, Depends(require_roles("admin", "employee", "customer"))
     ],
     session: Annotated[AsyncSession, Depends(get_db_session)],
+    idempotency_key: Annotated[str, Header(alias="X-Idempotency-Key")],
 ) -> dict:
     service = InsuranceSupportService(session)
     return await service.create_appointment(
         organization_id=context.organization_id,
         actor_user_id=context.user_id,
+        idempotency_key=idempotency_key,
         payload=payload,
     )
 
@@ -434,11 +561,13 @@ async def create_conversation(
         RequestContext, Depends(require_roles("admin", "employee", "customer"))
     ],
     session: Annotated[AsyncSession, Depends(get_db_session)],
+    idempotency_key: Annotated[str, Header(alias="X-Idempotency-Key")],
 ) -> dict:
     service = InsuranceSupportService(session)
     return await service.create_conversation(
         organization_id=context.organization_id,
         actor_user_id=context.user_id,
+        idempotency_key=idempotency_key,
         payload=payload,
     )
 
@@ -452,14 +581,13 @@ async def list_conversations(
     limit: Annotated[int, Query(ge=1, le=100)] = 25,
 ) -> dict:
     service = InsuranceSupportService(session)
-    return {
-        "items": await service.list_conversations(
+    items = await service.list_conversations(
             organization_id=context.organization_id,
             actor_user_id=context.user_id,
             role=context.role,
-            limit=limit,
+            limit=limit + 1,
         )
-    }
+    return paginated_response(items, limit=limit, sort="-created_at")
 
 
 @router.get("/conversations/{conversation_id}", response_model=ConversationDetailOut)
@@ -492,17 +620,25 @@ async def list_conversation_messages(
     ],
     session: Annotated[AsyncSession, Depends(get_db_session)],
     limit: Annotated[int, Query(ge=1, le=100)] = 50,
+    cursor: str | None = None,
 ) -> dict:
     service = InsuranceSupportService(session)
-    return {
-        "items": await service.list_messages(
+    offset = decode_offset_cursor(cursor)
+    items = await service.list_messages(
             organization_id=context.organization_id,
             actor_user_id=context.user_id,
             role=context.role,
             conversation_id=conversation_id,
-            limit=limit,
+            limit=limit + 1,
+            offset=offset,
         )
-    }
+    return paginated_response(
+        items,
+        limit=limit,
+        sort="created_at",
+        offset=offset,
+        next_cursor=encode_offset_cursor(offset + limit),
+    )
 
 
 @router.post("/conversations/{conversation_id}/messages", response_model=MessageOut)
@@ -513,6 +649,7 @@ async def create_message(
         RequestContext, Depends(require_roles("admin", "employee", "customer"))
     ],
     session: Annotated[AsyncSession, Depends(get_db_session)],
+    idempotency_key: Annotated[str, Header(alias="X-Idempotency-Key")],
 ) -> dict:
     service = InsuranceSupportService(session)
     return await service.create_message(
@@ -520,5 +657,6 @@ async def create_message(
         actor_user_id=context.user_id,
         role=context.role,
         conversation_id=conversation_id,
+        idempotency_key=idempotency_key,
         payload=payload,
     )
